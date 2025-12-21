@@ -1,0 +1,7 @@
+*.json
+*.cgns*
+*.txt
+output/
+bin/*
+*.gif
+*.pdf

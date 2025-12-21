@@ -1,0 +1,89 @@
+Full Potential Solver - Chapel Implmentation
+GRID_FILENAME = pre/cylinder_32x32.cgns
+START_FILENAME = 
+ELEMENT_TYPE = QuadElements
+OUTPUT_FILENAME = output/output.cgns
+MACH = 0.1
+ALPHA = 0.0
+TEMPERATURE = 288.0
+GAMMA = 1.4
+CFL = 1e+05
+IT_MAX = 1000000
+X_REF = 0.25
+Y_REF = 0.0
+MU_C = 2.0
+MACH_C = 0.98
+Mesh written to CGNS file: output/output_16.cgns
+Solution output/output_16.cgns written with fields: Pressure res mach VelocityZ VelocityX VelocityY rho phi xElem yElem
+=== Debug Gradient for Element 1024 ===
+Element centroid: (91.6211, -9.02389)
+Element volume: 270.36
+phi[elem]: 91.6211
+
+  Face 814
+    elem1=1023, elem2=1024
+    Other elem centroid: (77.8954, -7.67203)
+    Face centroid: (84.2029, -8.29327)
+    Midpoint of centroids: (84.7583, -8.34796)
+    phi[elem1]=77.8954, phi[elem2]=91.6211
+    phi midpoint avg: 84.7583
+    d1=6.33806, d2=7.45405
+    phi weighted: 84.2029
+    phi exact at face centroid: 84.2029
+    phi error (midpoint): 0.555309
+    phi error (weighted): 0.0
+    normal: (0.995185, -0.0980171), area: 16.6668
+    sign: -1.0, fluxX: -1396.63, fluxY: 137.557
+
+  Face 87
+    elem1=32, elem2=1024
+    Other elem centroid: (91.6211, 9.02389)
+    Face centroid: (92.5099, 0.0)
+    Midpoint of centroids: (91.6211, 2.52882e-08)
+    phi[elem1]=91.6211, phi[elem2]=91.6211
+    phi midpoint avg: 91.6211
+    d1=9.06755, d2=9.06755
+    phi weighted: 91.6211
+    phi exact at face centroid: 92.5099
+    phi error (midpoint): -0.888776
+    phi error (weighted): -0.888776
+    normal: (-0.0, -1.0), area: 14.9802
+    sign: -1.0, fluxX: 0.0, fluxY: 1372.51
+
+  Face 2008
+    elem1=1024, elem2=1086
+    Other elem centroid: (106.457, -10.4851)
+    Face centroid: (99.0393, -9.75452)
+    Midpoint of centroids: (99.0393, -9.75452)
+    phi[elem1]=91.6211, phi[elem2]=106.457
+    phi midpoint avg: 99.0393
+    d1=7.45405, d2=7.45405
+    phi weighted: 99.0393
+    phi exact at face centroid: 99.0393
+    phi error (midpoint): -7.10543e-14
+    phi error (weighted): -7.10543e-14
+    normal: (0.995185, -0.0980171), area: 19.6034
+    sign: 1.0, fluxX: 1932.16, fluxY: -190.301
+
+  Face 701
+    elem1=992, elem2=1024
+    Other elem centroid: (88.1002, -26.7249)
+    Face centroid: (90.7323, -18.0478)
+    Midpoint of centroids: (89.8606, -17.8744)
+    phi[elem1]=88.1002, phi[elem2]=91.6211
+    phi midpoint avg: 89.8606
+    d1=9.06755, d2=9.06755
+    phi weighted: 89.8606
+    phi exact at face centroid: 90.7323
+    phi error (midpoint): -0.871698
+    phi error (weighted): -0.871698
+    normal: (0.19509, 0.980785), area: 14.9802
+    sign: -1.0, fluxX: -262.618, fluxY: -1320.27
+
+  Sum of fluxes: (272.908, -0.506737)
+  Computed gradient: (1.00942, -0.0018743)
+  Expected gradient: (1.0, 0.0)
+  Error: (0.00942276, -0.0018743)
+===========================================
+
+total execution : 0.09287 seconds
