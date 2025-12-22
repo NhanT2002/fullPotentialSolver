@@ -16,6 +16,15 @@ proc l2Norm(array : [] real(64)) {
     return sqrt(norm);
 }
 
+proc RMSE(array : [] real(64), volumeArr : [] real(64)) {
+    var norm: real(64) = 0.0;
+    forall (val, vol) in zip(array, volumeArr) with (+ reduce norm) {
+        norm += (val / vol) * (val * vol);
+    }
+
+    return sqrt(norm / array.size);
+}
+
 proc GMRES(ref ksp: PETSCksp_c, const ref A: PETSCmatrix_c, const ref b: PETSCvector_c, ref x: PETSCvector_c) {
     ksp.setOperators(A, A);
     ksp.solve(b, x);

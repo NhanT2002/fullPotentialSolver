@@ -10,6 +10,7 @@ use IO;
 use linearAlgebra;
 use Time;
 use Sort;
+use leastSquaresGradient;
 import input.potentialInputs;
 
 config const elemID : int = 0;   // Element index for debugging purposes
@@ -40,8 +41,17 @@ class spatialDiscretization {
     var faceArea_: [face_dom] real(64);
     var faceNormalX_: [face_dom] real(64);
     var faceNormalY_: [face_dom] real(64);
+    var uFace_: [face_dom] real(64);
+    var vFace_: [face_dom] real(64);
+    var rhoFace_: [face_dom] real(64);
+
     var faceFluxX_: [face_dom] real(64);   // Flux storage for Green-Gauss
     var faceFluxY_: [face_dom] real(64);
+    var flux_: [face_dom] real(64);       // Flux storage for residual computation
+
+    // Least-squares gradient operator (precomputed coefficients)
+    var lsGrad_: owned LeastSquaresGradient?;
+    var lsGradQR_: owned LeastSquaresGradientQR?;
 
     proc init(Mesh: shared MeshData, ref inputs: potentialInputs) {
         this.mesh_ = Mesh;
@@ -53,11 +63,6 @@ class spatialDiscretization {
         this.elemDomain_dom = {1..this.nelemDomain_};
 
         this.elem_dom = {1..this.nelem_};
-        var a = sqrt((1.0**this.inputs_.GAMMA_) / (this.inputs_.GAMMA_*this.inputs_.MACH_*this.inputs_.MACH_));
-        this.uu_ = this.inputs_.U_INF_;
-        this.vv_ = this.inputs_.V_INF_;
-        this.pp_ = this.inputs_.P_INF_;
-        this.rhorho_ = 1.0;
         
         this.face_dom = {1..this.nface_};
     }
@@ -179,11 +184,25 @@ class spatialDiscretization {
             this.faceNormalX_[face] = nx;
             this.faceNormalY_[face] = ny;
         }
+
+        // Initialize and precompute least-squares gradient coefficients
+        this.lsGrad_ = new owned LeastSquaresGradient(this.mesh_, this.elemCentroidX_, this.elemCentroidY_);
+        this.lsGrad_!.precompute(this.elemCentroidX_, this.elemCentroidY_);
+
+        // Initialize and precompute QR-based least-squares gradient (Blazek formulation)
+        this.lsGradQR_ = new owned LeastSquaresGradientQR(this.mesh_, this.elemCentroidX_, this.elemCentroidY_);
+        this.lsGradQR_!.precompute(this.elemCentroidX_, this.elemCentroidY_);
     }
 
     proc initializeSolution() {
-        forall elem in this.elem_dom {
-            this.phi_[elem] = this.uu_[elem]*this.elemCentroidX_[elem] + this.vv_[elem]*this.elemCentroidY_[elem];
+        forall elem in 1..this.nelem_ {
+            this.uu_[elem] = this.inputs_.U_INF_;
+            this.vv_[elem] = this.inputs_.V_INF_;
+            this.rhorho_[elem] = this.inputs_.RHO_INF_;
+            this.pp_[elem] = this.inputs_.P_INF_;
+
+            this.phi_[elem] = this.inputs_.U_INF_ * this.elemCentroidX_[elem] +
+                              this.inputs_.V_INF_ * this.elemCentroidY_[elem];
         }
     }
 
@@ -345,13 +364,71 @@ class spatialDiscretization {
             gradY[elem] = gy * invVol;
         }
     }
-    
-    /*
-     * Compute gradient of phi_ field and store in uu_ (dφ/dx) and vv_ (dφ/dy).
-     * This is a convenience wrapper for the full potential solver.
-     */
+
     proc computeVelocityFromPhi() {
         computeGradientGreenGauss(this.phi_, this.uu_, this.vv_);
+    }
+
+    proc computeVelocityFromPhiLeastSquares() {
+        this.lsGrad_!.computeGradient(this.phi_, this.uu_, this.vv_, this.elemCentroidX_, this.elemCentroidY_);
+    }
+
+    proc computeVelocityFromPhiLeastSquaresQR() {
+        this.lsGradQR_!.computeGradient(this.phi_, this.uu_, this.vv_, this.elemCentroidX_, this.elemCentroidY_);
+    }
+
+    proc computeFluxes() {
+        // Compute continuity fluxes at each face from averaged states
+        forall face in 1..this.nface_ {
+            const elem1 = this.mesh_.edge2elem_[1, face];
+            const elem2 = this.mesh_.edge2elem_[2, face];
+
+            // Average states at face
+            const uFace_avg = 0.5 * (this.uu_[elem1] + this.uu_[elem2]);
+            const vFace_avg = 0.5 * (this.vv_[elem1] + this.vv_[elem2]);
+
+            // Apply correction
+            const l_IJ = sqrt( (this.elemCentroidX_[elem2] - this.elemCentroidX_[elem1])**2 +
+                                (this.elemCentroidY_[elem2] - this.elemCentroidY_[elem1])**2 );
+            const t_IJ_x = (this.elemCentroidX_[elem2] - this.elemCentroidX_[elem1]) / l_IJ;
+            const t_IJ_y = (this.elemCentroidY_[elem2] - this.elemCentroidY_[elem1]) / l_IJ;
+
+            // Directional derivative
+            const dPhidl = (this.phi_[elem2] - this.phi_[elem1]) / l_IJ;
+
+            const gradPhiDotT = uFace_avg * t_IJ_x + vFace_avg * t_IJ_y;
+
+            const faceNormalX = this.faceNormalX_[face];
+            const faceNormalY = this.faceNormalY_[face];
+
+            const inverseFaceNormalDotT = 1 / (faceNormalX * t_IJ_x + faceNormalY * t_IJ_y);
+
+            const uFace = uFace_avg - (gradPhiDotT - dPhidl) * (faceNormalX * inverseFaceNormalDotT);
+            const vFace = vFace_avg - (gradPhiDotT - dPhidl) * (faceNormalY * inverseFaceNormalDotT);
+            
+            this.uFace_[face] = uFace;
+            this.vFace_[face] = vFace;
+
+            // Continuity flux: (u*nx + v*ny) * A
+            this.flux_[face] = (uFace * this.faceNormalX_[face] + vFace * this.faceNormalY_[face]) * this.faceArea_[face];
+        }
+    }
+
+    proc computeResiduals() {
+        // Compute residuals per element from face fluxes
+        forall elem in 1..this.nelemDomain_ {
+            const faces = this.mesh_.elem2edge_[this.mesh_.elem2edgeIndex_[elem] + 1 .. this.mesh_.elem2edgeIndex_[elem + 1]];
+            var res = 0.0;
+            for face in faces {
+                const elem1 = this.mesh_.edge2elem_[1, face];
+                
+                // Sign: +1 if we are elem1 (flux outward), -1 if we are elem2
+                const sign = if elem1 == elem then 1.0 else -1.0;
+                
+                res += sign * this.flux_[face];
+            }
+            this.res_[elem] = res;
+        }
     }
 
     proc mach(u: real(64), v: real(64), rho: real(64)): real(64) {
