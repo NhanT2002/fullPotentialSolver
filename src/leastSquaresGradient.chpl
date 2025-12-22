@@ -217,6 +217,11 @@ class LeastSquaresGradient {
  *
  * where w_ij are precomputed weight vectors that depend only on geometry.
  *
+ * OPTIMIZATION: The final weights (wx*theta, wy*theta) are precomputed
+ * and stored per face, for BOTH elem1's and elem2's perspectives.
+ * At runtime, the gradient is simply:
+ *   grad_i = sum_j [wxFinal_ij, wyFinal_ij] * (phi_j - phi_i)
+ *
  * Advantages over normal equations approach:
  *   - Better numerical conditioning on stretched grids
  *   - Avoids forming A^T*A which can square the condition number
@@ -228,15 +233,14 @@ class LeastSquaresGradientQR {
     var mesh_: shared MeshData;
     var nelemDomain_: int;
     
-    // Per-cell QR decomposition coefficients (upper triangular R matrix)
-    var elem_dom: domain(1) = {1..0};
-    var r11_: [elem_dom] real(64);
-    var r12_: [elem_dom] real(64);
-    var r22_: [elem_dom] real(64);
-    
-    // Per-face: theta (inverse distance)
+    // Precomputed final weights per face, for both perspectives
+    // wxFinal1_[face] = weight for elem1 computing gradient using elem2 as neighbor
+    // wxFinal2_[face] = weight for elem2 computing gradient using elem1 as neighbor
     var face_dom: domain(1) = {1..0};
-    var theta_: [face_dom] real(64);
+    var wxFinal1_: [face_dom] real(64);  // For elem1's gradient
+    var wyFinal1_: [face_dom] real(64);
+    var wxFinal2_: [face_dom] real(64);  // For elem2's gradient
+    var wyFinal2_: [face_dom] real(64);
     
     /*
      * Initialize the QR-based least-squares gradient operator
@@ -246,27 +250,29 @@ class LeastSquaresGradientQR {
               ref elemCentroidY: [] real(64)) {
         this.mesh_ = Mesh;
         this.nelemDomain_ = Mesh.nelem_;
-        this.elem_dom = {1..this.nelemDomain_};
         this.face_dom = {1..Mesh.nedge_};
     }
     
     /*
-     * Precompute QR factorization coefficients
+     * Precompute QR factorization coefficients and final weights
      * Call this once after mesh metrics are initialized
      *
-     * Following Blazek Eqs. (5.55) and (5.59) adapted for 2D.
+     * Following Blazek Eqs. (5.55), (5.59), (5.61)-(5.62) adapted for 2D.
      * 
-     * The weighted system matrix A has rows: [theta_j * dx_ij, theta_j * dy_ij]
-     * 
-     * R matrix entries (Eq. 5.59 for 2D):
-     *   r11 = sqrt(sum_j (theta_j * dx_ij)^2)
-     *   r12 = (1/r11) * sum_j (theta_j * dx_ij) * (theta_j * dy_ij)
-     *   r22 = sqrt(sum_j (theta_j * dy_ij)^2 - r12^2)
+     * This precomputes everything so that at runtime, gradient = sum(w * dphi)
      */
     proc precompute(ref elemCentroidX: [] real(64), 
                     ref elemCentroidY: [] real(64)) {
         
-        // Phase 1: Compute and store theta (inverse distance) per face
+        // Temporary storage for per-face theta and per-cell R matrix
+        var theta: [this.face_dom] real(64);
+        
+        const elem_dom = {1..this.nelemDomain_};
+        var r11: [elem_dom] real(64);
+        var r12: [elem_dom] real(64);
+        var r22: [elem_dom] real(64);
+        
+        // Phase 1: Compute theta (inverse distance) per face
         forall face in this.face_dom {
             const elem1 = this.mesh_.edge2elem_[1, face];
             const elem2 = this.mesh_.edge2elem_[2, face];
@@ -275,8 +281,7 @@ class LeastSquaresGradientQR {
             const dy = elemCentroidY[elem2] - elemCentroidY[elem1];
             const d = sqrt(dx*dx + dy*dy);
             
-            // theta = 1/d (inverse distance weighting, recommended by Blazek)
-            this.theta_[face] = 1.0 / d;
+            theta[face] = 1.0 / d;
         }
         
         // Phase 2: Compute R matrix entries for each cell
@@ -288,10 +293,9 @@ class LeastSquaresGradientQR {
             const cy = elemCentroidY[elem];
             
             // Accumulate sums for R matrix (Eq. 5.59)
-            // The matrix A has rows [theta*dx, theta*dy] for each neighbor
-            var sum_tdx_sq = 0.0;     // sum((theta*dx)^2)
-            var sum_tdx_tdy = 0.0;    // sum((theta*dx)*(theta*dy))
-            var sum_tdy_sq = 0.0;     // sum((theta*dy)^2)
+            var sum_tdx_sq = 0.0;
+            var sum_tdx_tdy = 0.0;
+            var sum_tdy_sq = 0.0;
             
             for face in faces {
                 const elem1 = this.mesh_.edge2elem_[1, face];
@@ -300,10 +304,10 @@ class LeastSquaresGradientQR {
                 
                 const dx = elemCentroidX[neighbor] - cx;
                 const dy = elemCentroidY[neighbor] - cy;
-                const theta = this.theta_[face];
+                const t = theta[face];
                 
-                const tdx = theta * dx;
-                const tdy = theta * dy;
+                const tdx = t * dx;
+                const tdy = t * dy;
                 
                 sum_tdx_sq  += tdx * tdx;
                 sum_tdx_tdy += tdx * tdy;
@@ -311,81 +315,99 @@ class LeastSquaresGradientQR {
             }
             
             // R matrix entries (Eq. 5.59 for 2D)
-            const r11 = sqrt(sum_tdx_sq);
-            const r12 = sum_tdx_tdy / r11;
-            const r22_sq = sum_tdy_sq - r12 * r12;
-            const r22 = sqrt(max(r22_sq, 1e-30));
+            r11[elem] = sqrt(sum_tdx_sq);
+            r12[elem] = sum_tdx_tdy / r11[elem];
+            const r22_sq = sum_tdy_sq - r12[elem] * r12[elem];
+            r22[elem] = sqrt(max(r22_sq, 1e-30));
+        }
+        
+        // Phase 3: Compute and store final weights for each face
+        // Store weights for both elem1's and elem2's perspectives
+        forall face in this.face_dom {
+            const elem1 = this.mesh_.edge2elem_[1, face];
+            const elem2 = this.mesh_.edge2elem_[2, face];
+            const t = theta[face];
             
-            this.r11_[elem] = r11;
-            this.r12_[elem] = r12;
-            this.r22_[elem] = r22;
+            // Displacement from elem1 to elem2
+            const dx12 = elemCentroidX[elem2] - elemCentroidX[elem1];
+            const dy12 = elemCentroidY[elem2] - elemCentroidY[elem1];
+            
+            // Weights for elem1's gradient (neighbor is elem2)
+            if elem1 <= this.nelemDomain_ {
+                const r11_e = r11[elem1];
+                const r12_e = r12[elem1];
+                const r22_e = r22[elem1];
+                
+                const r12_r11 = r12_e / r11_e;
+                const inv_r11_sq = 1.0 / (r11_e * r11_e);
+                const inv_r22_sq = 1.0 / (r22_e * r22_e);
+                
+                // dx, dy from elem1's perspective (toward elem2)
+                const dx = dx12;
+                const dy = dy12;
+                
+                const alpha1 = t * dx * inv_r11_sq;
+                const alpha2 = t * (dy - r12_r11 * dx) * inv_r22_sq;
+                const wx = alpha1 - r12_r11 * alpha2;
+                const wy = alpha2;
+                
+                this.wxFinal1_[face] = wx * t;
+                this.wyFinal1_[face] = wy * t;
+            }
+            
+            // Weights for elem2's gradient (neighbor is elem1)
+            if elem2 <= this.nelemDomain_ {
+                const r11_e = r11[elem2];
+                const r12_e = r12[elem2];
+                const r22_e = r22[elem2];
+                
+                const r12_r11 = r12_e / r11_e;
+                const inv_r11_sq = 1.0 / (r11_e * r11_e);
+                const inv_r22_sq = 1.0 / (r22_e * r22_e);
+                
+                // dx, dy from elem2's perspective (toward elem1) = -dx12, -dy12
+                const dx = -dx12;
+                const dy = -dy12;
+                
+                const alpha1 = t * dx * inv_r11_sq;
+                const alpha2 = t * (dy - r12_r11 * dx) * inv_r22_sq;
+                const wx = alpha1 - r12_r11 * alpha2;
+                const wy = alpha2;
+                
+                this.wxFinal2_[face] = wx * t;
+                this.wyFinal2_[face] = wy * t;
+            }
         }
     }
     
     /*
-     * Compute gradient of a scalar field using precomputed QR coefficients
-     * 
-     * This uses Eq. (5.60): grad_i = sum_j w_ij * theta_j * (U_j - U_i)
-     *
-     * The weight vector w_ij is computed from Eqs. (5.61)-(5.62) for 2D:
-     *   alpha_ij,1 = (theta_j * dx_ij) / r11^2
-     *   alpha_ij,2 = (theta_j * dy_ij - (r12/r11) * theta_j * dx_ij) / r22^2
-     *             = theta_j * (dy_ij - (r12/r11) * dx_ij) / r22^2
-     *
-     *   w_ij = [alpha_ij,1 - (r12/r11) * alpha_ij,2,
-     *           alpha_ij,2]
+     * Compute gradient of a scalar field using fully precomputed weights
      */
     proc computeGradient(ref phi: [] real(64), 
                          ref gradX: [] real(64), 
-                         ref gradY: [] real(64),
-                         ref elemCentroidX: [] real(64),
-                         ref elemCentroidY: [] real(64)) {
+                         ref gradY: [] real(64)) {
         
         forall elem in 1..this.nelemDomain_ {
             const faces = this.mesh_.elem2edge_[this.mesh_.elem2edgeIndex_[elem] + 1 .. 
                                                  this.mesh_.elem2edgeIndex_[elem + 1]];
             
             const phiI = phi[elem];
-            const cx = elemCentroidX[elem];
-            const cy = elemCentroidY[elem];
-            
-            // Get precomputed R matrix
-            const r11 = this.r11_[elem];
-            const r12 = this.r12_[elem];
-            const r22 = this.r22_[elem];
-            
-            // Precompute ratios
-            const r12_r11 = r12 / r11;
-            const inv_r11_sq = 1.0 / (r11 * r11);
-            const inv_r22_sq = 1.0 / (r22 * r22);
-            
-            // Accumulate gradient using Eq. (5.60)
             var gx = 0.0, gy = 0.0;
             
             for face in faces {
                 const elem1 = this.mesh_.edge2elem_[1, face];
                 const elem2 = this.mesh_.edge2elem_[2, face];
                 const neighbor = if elem1 == elem then elem2 else elem1;
-                
-                const dx = elemCentroidX[neighbor] - cx;
-                const dy = elemCentroidY[neighbor] - cy;
-                const theta = this.theta_[face];
                 const dphi = phi[neighbor] - phiI;
                 
-                // Alpha terms (Eq. 5.62 for 2D)
-                // alpha_1 = theta * dx / r11^2
-                // alpha_2 = theta * (dy - (r12/r11) * dx) / r22^2
-                const alpha1 = theta * dx * inv_r11_sq;
-                const alpha2 = theta * (dy - r12_r11 * dx) * inv_r22_sq;
-                
-                // Weight vector (Eq. 5.61 for 2D)
-                // w = [alpha1 - (r12/r11)*alpha2, alpha2]
-                const wx = alpha1 - r12_r11 * alpha2;
-                const wy = alpha2;
-                
-                // Gradient contribution: w_ij * theta_j * dphi
-                gx += wx * theta * dphi;
-                gy += wy * theta * dphi;
+                // Use precomputed weights for correct perspective
+                if elem == elem1 {
+                    gx += this.wxFinal1_[face] * dphi;
+                    gy += this.wyFinal1_[face] * dphi;
+                } else {
+                    gx += this.wxFinal2_[face] * dphi;
+                    gy += this.wyFinal2_[face] * dphi;
+                }
             }
             
             gradX[elem] = gx;

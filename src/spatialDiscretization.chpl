@@ -374,7 +374,7 @@ class spatialDiscretization {
     }
 
     proc computeVelocityFromPhiLeastSquaresQR() {
-        this.lsGradQR_!.computeGradient(this.phi_, this.uu_, this.vv_, this.elemCentroidX_, this.elemCentroidY_);
+        this.lsGradQR_!.computeGradient(this.phi_, this.uu_, this.vv_);
     }
 
     proc computeFluxes() {
@@ -429,6 +429,13 @@ class spatialDiscretization {
             }
             this.res_[elem] = res;
         }
+    }
+
+    proc run() {
+        this.updateGhostCells();
+        this.computeVelocityFromPhiLeastSquaresQR();
+        this.computeFluxes();
+        this.computeResiduals();
     }
 
     proc mach(u: real(64), v: real(64), rho: real(64)): real(64) {
