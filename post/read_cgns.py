@@ -7,19 +7,20 @@ def readCGNS(filename) :
     # Read CGNS file
     with h5py.File(filename, 'r') as f:
 
-        x = f['Base/dom-1/GridCoordinates/CoordinateX/ data'][:]
-        y = f['Base/dom-1/GridCoordinates/CoordinateY/ data'][:]
-        z = f['Base/dom-1/GridCoordinates/CoordinateZ/ data'][:]
+        # x = f['Base/dom-1/GridCoordinates/CoordinateX/ data'][:]
+        # y = f['Base/dom-1/GridCoordinates/CoordinateY/ data'][:]
+        # z = f['Base/dom-1/GridCoordinates/CoordinateZ/ data'][:]
 
-        VelocityX = f['Base/dom-1/FLOW_SOLUTION_CC/VelocityX/ data'][:]
-        VelocityY = f['Base/dom-1/FLOW_SOLUTION_CC/VelocityY/ data'][:]
-        VelocityZ = f['Base/dom-1/FLOW_SOLUTION_CC/VelocityZ/ data'][:]
+        # VelocityX = f['Base/dom-1/FLOW_SOLUTION_CC/VelocityX/ data'][:]
+        # VelocityY = f['Base/dom-1/FLOW_SOLUTION_CC/VelocityY/ data'][:]
+        # VelocityZ = f['Base/dom-1/FLOW_SOLUTION_CC/VelocityZ/ data'][:]
 
-        # eleme2nodes = f['Base/dom-1/Elements_NGON_n/ElementConnectivity/ data'][:]
-        # elem2nodesIndex = f['Base/dom-1/Elements_NGON_n/ElementStartOffset/ data'][:]
-
-        # X = f['WallBase/wall/WALL_FLOW_SOLUTION_CC/xWall/ data'][:]
-        # Y = f['WallBase/wall/WALL_FLOW_SOLUTION_CC/yWall/ data'][:]
+        X = f['WallBase/wall/WALL_FLOW_SOLUTION_CC/xWall/ data'][:]
+        Y = f['WallBase/wall/WALL_FLOW_SOLUTION_CC/yWall/ data'][:]
+        nx = f['WallBase/wall/WALL_FLOW_SOLUTION_CC/nxWall/ data'][:]
+        ny = f['WallBase/wall/WALL_FLOW_SOLUTION_CC/nyWall/ data'][:]
+        VelocityX_wall = f['WallBase/wall/WALL_FLOW_SOLUTION_CC/uWall/ data'][:]
+        VelocityY_wall = f['WallBase/wall/WALL_FLOW_SOLUTION_CC/vWall/ data'][:]
         # Cp = f['WallBase/wall/WALL_FLOW_SOLUTION_CC/pressureWall/ data'][:]
 
         # it = f['Base/GlobalConvergenceHistory/IterationCounters/ data'][:]
@@ -44,44 +45,31 @@ def readCGNS(filename) :
 
         data = {}
 
-        data['x'] = x
-        data['y'] = y
-        data['z'] = z
-        data['VelocityX'] = VelocityX
-        data['VelocityY'] = VelocityY
-        data['VelocityZ'] = VelocityZ
+        data['X_wall'] = X
+        data['Y_wall'] = Y
+        data['nx_wall'] = nx
+        data['ny_wall'] = ny
+        data['VelocityX_wall'] = VelocityX_wall
+        data['VelocityY_wall'] = VelocityY_wall
 
         return data
-    
-errorList = []
-cells = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
-for N in cells :
-    data = readCGNS(f'../output/convergence_green_gauss/cylinder_{N}x{N}.cgns')
 
-    vel_mag = np.sqrt(data['VelocityX']**2 + data['VelocityY']**2 + data['VelocityZ']**2)
-    # Normalized L2 (RMS) error. NOTE: using sqrt(sum()) is not grid-independent and
-    # will shift the apparent convergence rate in 2D by about -1.
-    error_rms = np.sqrt(np.sum((vel_mag - 1.0)**2) / vel_mag.size)
-    errorList.append(error_rms)
 
-errorList = np.array(errorList)
-h = 1/np.array(cells)
+data = readCGNS("../output/output_74.cgns")
+
+# plot circle of radius 0.5
+theta = np.linspace(0, 2 * np.pi, 100)
+x_circle = 0.5 * np.cos(theta)
+y_circle = 0.5 * np.sin(theta)
 
 plt.figure()
-plt.loglog(h, errorList, 'o')
-for n in cells :
-    plt.text(1.1*h[cells.index(n)], 0.8*errorList[cells.index(n)], f'{n}', fontsize=12)
-plt.xlabel('Mesh size h')
-plt.ylabel('L2 Error in Velocity Magnitude')
-plt.grid(True)
+plt.quiver(data['X_wall'], data['Y_wall'], data['nx_wall'], data['ny_wall'])
+plt.quiver(data['X_wall'], data['Y_wall'], data['VelocityX_wall'], data['VelocityY_wall'])
+plt.axis('equal')
 
-# plot convergence rate line
+plt.plot(x_circle, y_circle, 'r--')
 
-order = np.polyfit(np.log(h[-3:]), np.log(errorList[-3:]), 1)
-rate = order[0]
-
-plt.loglog(h, np.exp(order[1]) * h**rate, 'k--', label=f'Order ~ {rate:.4f}')
-plt.legend()
-plt.title('Convergence of Velocity Magnitude Error')
-plt.tight_layout()
-plt.savefig('../output/convergence_green_gauss/convergence_plot.pdf')
+# compute n dot Velocity
+ndotV = data['nx_wall'] * data['VelocityX_wall'] + data['ny_wall'] * data['VelocityY_wall']
+max_ndotV = np.max(np.abs(ndotV))
+print("Max |n dot V| on wall: ", max_ndotV)

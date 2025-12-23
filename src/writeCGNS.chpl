@@ -263,8 +263,8 @@ class potentialFlowWriter_c {
     }
   }
 
-  proc writeConvergenceHistory(time: list(real(64)), iterations: list(int), residuals: list(real(64)), resPhi: list(real(64)), cls: list(real(64)), cds: list(real(64)), cms: list(real(64)), circulation: list(real(64))) {
-    const nMetrics = 8;
+  proc writeConvergenceHistory(time: list(real(64)), iterations: list(int), residuals: list(real(64)), cls: list(real(64)), cds: list(real(64)), cms: list(real(64)), circulation: list(real(64))) {
+    const nMetrics = 7;
     const maxIter = iterations.size;
 
     var iterationsArray: [0..<maxIter] int;
@@ -275,13 +275,12 @@ class potentialFlowWriter_c {
     var convData: [0..<nMetrics, 0..<maxIter] real;
     convData[0, ..] = time;
     convData[1, ..] = residuals;
-    convData[2, ..] = resPhi;
-    convData[3, ..] = cls;
-    convData[4, ..] = cds;
-    convData[5, ..] = cms;
-    convData[6, ..] = circulation;
+    convData[2, ..] = cls;
+    convData[3, ..] = cds;
+    convData[4, ..] = cms;
+    convData[5, ..] = circulation;
 
-    var names = ["Time", "Residual", "ResPhi", "Cl", "Cd", "Cm", "Circulation"];
+    var names = ["Time", "Residual", "Cl", "Cd", "Cm", "Circulation"];
 
     cgnsFile_.writeGlobalConvergenceHistory("ConvergenceHistory", iterationsArray, names, convData);
 

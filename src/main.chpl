@@ -4,6 +4,7 @@ use Math;
 import input.potentialInputs;
 use mesh;
 use spatialDiscretization;
+use temporalDiscretization;
 use testMetrics;
 use linearAlgebra;
 
@@ -24,13 +25,10 @@ proc main() {
         Mesh.buildConnectivity();
 
         var spatialDisc = new shared spatialDiscretization(Mesh, inputs);
-        spatialDisc.initializeMetrics();
-        spatialDisc.initializeSolution();
-        spatialDisc.run();
 
-
-        
-        spatialDisc.writeSolution();
+        var steadySolver = new shared temporalDiscretization(spatialDisc, inputs);
+        steadySolver.initialize();
+        steadySolver.solve();
 
         t_ini.stop();
         writeln("total execution : ", t_ini.elapsed(), " seconds");

@@ -9,6 +9,7 @@ config const CIRCULATION_CONV_TOL : real(64);
 
 config const ELEMENT_TYPE : string = "QuadElements";
 config const OUTPUT_FILENAME : string = "output.cgns";
+config const CGNS_OUTPUT_FREQ : int;
 config const MACH : real(64);
 config const ALPHA : real(64);
 config const TEMPERATURE : real(64);
@@ -32,6 +33,7 @@ config const GMRES_ATOL : real(64);
 config const GMRES_DTOL : real(64);
 config const GMRES_MAXIT : int;
 config const GMRES_RESTART : int;
+config const GMRES_PRECON : string;
 
 config const DUAL_TIME_STEP : bool;
 config const ALPHA_0 : real(64);
@@ -52,6 +54,7 @@ record potentialInputs {
     var CIRCULATION_CONV_TOL_: real(64) = CIRCULATION_CONV_TOL;
     var ELEMENT_TYPE_: string = ELEMENT_TYPE;
     var OUTPUT_FILENAME_: string = OUTPUT_FILENAME;
+    var CGNS_OUTPUT_FREQ_: int = CGNS_OUTPUT_FREQ;
     var MACH_: real(64) = MACH;
     var ALPHA_: real(64) = ALPHA;
     var TEMPERATURE_: real(64) = TEMPERATURE;   
@@ -71,7 +74,7 @@ record potentialInputs {
     var U_INF_ = VEL_INF_ * cos(ALPHA_ * pi / 180.0);
     var V_INF_ = VEL_INF_ * sin(ALPHA_ * pi / 180.0);
     var P_INF_ = RHO_INF_ ** GAMMA_ / (GAMMA_ * MACH_ * MACH_);
-    var Q_INF_ = 0.5 * GAMMA_ * P_INF_ * MACH_ * MACH_;
+    var Q_INF_ = 0.5 * RHO_INF_ * VEL_INF_ * VEL_INF_;
     
     var X_REF_: real(64) = X_REF;
     var Y_REF_: real(64) = Y_REF;
@@ -86,6 +89,7 @@ record potentialInputs {
     var GMRES_DTOL_: real(64) = GMRES_DTOL;
     var GMRES_MAXIT_: int = GMRES_MAXIT;
     var GMRES_RESTART_: int = GMRES_RESTART;
+    var GMRES_PRECON_: string = GMRES_PRECON;
 
     var DUAL_TIME_STEP_: bool = DUAL_TIME_STEP;
     var ALPHA_0_: real(64) = ALPHA_0;
