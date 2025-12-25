@@ -5,3 +5,5 @@ output/
 bin/*
 *.gif
 *.pdf
+*.out
+doc/

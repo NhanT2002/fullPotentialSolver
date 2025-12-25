@@ -21,16 +21,15 @@ def readCGNS(filename) :
         ny = f['WallBase/wall/WALL_FLOW_SOLUTION_CC/nyWall/ data'][:]
         VelocityX_wall = f['WallBase/wall/WALL_FLOW_SOLUTION_CC/uWall/ data'][:]
         VelocityY_wall = f['WallBase/wall/WALL_FLOW_SOLUTION_CC/vWall/ data'][:]
-        # Cp = f['WallBase/wall/WALL_FLOW_SOLUTION_CC/pressureWall/ data'][:]
+        Cp = f['WallBase/wall/WALL_FLOW_SOLUTION_CC/cpWall/ data'][:]
 
-        # it = f['Base/GlobalConvergenceHistory/IterationCounters/ data'][:]
-        # time = f['Base/GlobalConvergenceHistory/Time/ data'][:]
-        # res = f['Base/GlobalConvergenceHistory/Residual/ data'][:]
-        # resPhi = f['Base/GlobalConvergenceHistory/ResPhi/ data'][:]
-        # cl = f['Base/GlobalConvergenceHistory/Cl/ data'][:]
-        # cd = f['Base/GlobalConvergenceHistory/Cd/ data'][:]
-        # cm = f['Base/GlobalConvergenceHistory/Cm/ data'][:]
-        # circulation = f['Base/GlobalConvergenceHistory/Circulation/ data'][:]
+        it = f['Base/GlobalConvergenceHistory/IterationCounters/ data'][:]
+        time = f['Base/GlobalConvergenceHistory/Time/ data'][:]
+        res = f['Base/GlobalConvergenceHistory/Residual/ data'][:]
+        cl = f['Base/GlobalConvergenceHistory/Cl/ data'][:]
+        cd = f['Base/GlobalConvergenceHistory/Cd/ data'][:]
+        cm = f['Base/GlobalConvergenceHistory/Cm/ data'][:]
+        circulation = f['Base/GlobalConvergenceHistory/Circulation/ data'][:]
 
         # phi = f['Base/dom-1/FLOW_SOLUTION_CC/phi/ data'][:]
         # u = f['Base/dom-1/FLOW_SOLUTION_CC/u/ data'][:]
@@ -41,7 +40,7 @@ def readCGNS(filename) :
         # resPhi = np.zeros_like(it)  # Placeholder for resPhi, as it is not available in the file
         # circulation = np.zeros_like(it)  # Placeholder for circulation, as it is not available in the file
 
-        # res = res / res[0]
+        res = res / res[0]  # Normalize residuals
 
         data = {}
 
@@ -51,25 +50,60 @@ def readCGNS(filename) :
         data['ny_wall'] = ny
         data['VelocityX_wall'] = VelocityX_wall
         data['VelocityY_wall'] = VelocityY_wall
+        data['Cp_wall'] = Cp
+
+        data['it'] = it
+        data['time'] = time
+        data['res'] = res
+        data['cl'] = cl
+        data['cd'] = cd
+        data['cm'] = cm
+        data['circulation'] = circulation
 
         return data
 
 
-data = readCGNS("../output/output_74.cgns")
+data = readCGNS("../output/output_53.cgns")
+data2 = readCGNS("../output/output_54.cgns")
+data3 = readCGNS("../output/cylinder_1024x1024.cgns")
 
-# plot circle of radius 0.5
-theta = np.linspace(0, 2 * np.pi, 100)
-x_circle = 0.5 * np.cos(theta)
-y_circle = 0.5 * np.sin(theta)
 
 plt.figure()
-plt.quiver(data['X_wall'], data['Y_wall'], data['nx_wall'], data['ny_wall'])
-plt.quiver(data['X_wall'], data['Y_wall'], data['VelocityX_wall'], data['VelocityY_wall'])
-plt.axis('equal')
+plt.plot(data['X_wall'], data['Cp_wall'], '-', label='data')
+plt.plot(data2['X_wall'], data2['Cp_wall'], '-', label='data2')
+plt.plot(data3['X_wall'], data3['Cp_wall'], '-', label='data3')
+plt.gca().invert_yaxis()
+plt.xlabel('x')
+plt.ylabel('Cp on wall')
+plt.title('Pressure Coefficient Distribution on Wall')
+plt.legend()
+plt.grid()
 
-plt.plot(x_circle, y_circle, 'r--')
+plt.figure()
+plt.semilogy(data['it'], data['res'], label='data')
+plt.semilogy(data2['it'], data2['res'], label='data2')
+plt.semilogy(data3['it'], data3['res'], label='data3')
+plt.xlabel('Iteration')
+plt.ylabel('Normalized Residual')
+plt.title('Convergence History')
+plt.legend()
+plt.grid()
 
-# compute n dot Velocity
-ndotV = data['nx_wall'] * data['VelocityX_wall'] + data['ny_wall'] * data['VelocityY_wall']
-max_ndotV = np.max(np.abs(ndotV))
-print("Max |n dot V| on wall: ", max_ndotV)
+
+
+# # plot circle of radius 0.5
+# theta = np.linspace(0, 2 * np.pi, 100)
+# x_circle = 0.5 * np.cos(theta)
+# y_circle = 0.5 * np.sin(theta)
+
+# plt.figure()
+# plt.quiver(data['X_wall'], data['Y_wall'], data['nx_wall'], data['ny_wall'])
+# plt.quiver(data['X_wall'], data['Y_wall'], data['VelocityX_wall'], data['VelocityY_wall'])
+# plt.axis('equal')
+
+# plt.plot(x_circle, y_circle, 'r--')
+
+# # compute n dot Velocity
+# ndotV = data['nx_wall'] * data['VelocityX_wall'] + data['ny_wall'] * data['VelocityY_wall']
+# max_ndotV = np.max(np.abs(ndotV))
+# print("Max |n dot V| on wall: ", max_ndotV)

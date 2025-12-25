@@ -100,21 +100,36 @@ class temporalDiscretization {
         //
         // Residual: res_I = sum over faces f of elem I: sign_f * flux_f
         //
-        // Simplified flux at face (between I and J), ignoring correction term:
-        //   flux = (V_face · n) * A
-        //   V_face = V_avg = 0.5 * (gradPhi_I + gradPhi_J)
+        // Flux with deferred correction (from spatialDiscretization.computeFluxes):
+        //   V_face = V_avg - delta * corrCoeff
+        //   where delta = V_avg · t - (phi_2 - phi_1) * invL
+        //   and corrCoeff = n / (n · t)
         //
-        // So:
-        //   V_face · n = 0.5 * (gradPhi_I · n + gradPhi_J · n)
-        //              = 0.5 * (u_I*nx + v_I*ny + u_J*nx + v_J*ny)
+        // Expanding V_face · n:
+        //   V_face · n = V_avg · n - delta * (corrCoeff · n)
+        //              = V_avg · n - (V_avg · t - dPhi/dL) * k
+        //   where k = 1/(n · t) = corrCoeff · n
         //
-        // Since gradPhi_I = sum_k w_Ik * (phi_k - phi_I):
-        //   d(gradPhi_I)/d(phi_I) = -sumW_I (sum of all weights)
-        //   d(gradPhi_I)/d(phi_k) = w_Ik (weight for neighbor k)
+        //   = V_avg · (n - k*t) + k * invL * (phi_2 - phi_1)
+        //   = 0.5*(gradPhi_1 + gradPhi_2) · m + directCoeff * (phi_2 - phi_1)
         //
-        // Jacobian contributions for face IJ with sign s (from elem I's perspective):
-        //   d(res_I)/d(phi_I) += s * A * 0.5 * (-sumWx_I*nx - sumWy_I*ny)
-        //   d(res_I)/d(phi_J) += s * A * 0.5 * (wx_IJ*nx + wy_IJ*ny - sumWx_J*nx - sumWy_J*ny)
+        // where m = n - k*t is the effective normal, and directCoeff = k * invL
+        //
+        // For WALL boundaries:
+        //   phi_ghost = phi_interior (Neumann BC)
+        //   V_ghost = V_int - 2*(V_int·n)*n (mirror velocity)
+        //   V_avg = V_int - (V_int·n)*n = V_int,tangent
+        //
+        // So V_avg · m = V_int · m - (V_int·n)*(n·m)
+        //              = V_int · [m - (n·m)*n]
+        // Define m_wall = m - (n·m)*n (tangential projection of effective normal)
+        //
+        // And the direct term: phi_ghost - phi_int = 0
+        //
+        // Derivatives:
+        //   gradPhi_I = sum_k w_Ik * (phi_k - phi_I)
+        //   d(gradPhi_I)/d(phi_I) = -sumW_I
+        //   d(gradPhi_I)/d(phi_k) = w_Ik
         
         this.A_petsc.zeroEntries();
         
@@ -138,64 +153,142 @@ class temporalDiscretization {
                 const ny = this.spatialDisc_.faceNormalY_[face];
                 const area = this.spatialDisc_.faceArea_[face];
                 
+                // Get precomputed correction coefficients
+                const t_x = this.spatialDisc_.t_IJ_x_[face];
+                const t_y = this.spatialDisc_.t_IJ_y_[face];
+                const invL = this.spatialDisc_.invL_IJ_[face];
+                const nDotT = nx * t_x + ny * t_y;
+                const k = 1.0 / nDotT;
+                
+                // Effective normal: m = n - k*t (accounts for deferred correction)
+                const mx = nx - k * t_x;
+                const my = ny - k * t_y;
+                
+                // Direct phi coefficient: k * invL
+                const directCoeff = k * invL;
+                
                 // Get gradient weights for this element
-                var sumWx_elem: real(64);
-                var sumWy_elem: real(64);
+                const sumWx_elem = this.spatialDisc_.lsGradQR_!.sumWx_[elem];
+                const sumWy_elem = this.spatialDisc_.lsGradQR_!.sumWy_[elem];
                 var wx_elemToNeighbor: real(64);
                 var wy_elemToNeighbor: real(64);
+                var wx_neighborToElem: real(64);
+                var wy_neighborToElem: real(64);
                 
                 if elem1 == elem {
                     // elem is elem1, using weights from perspective 1
-                    sumWx_elem = this.spatialDisc_.lsGradQR_!.sumWx1_[elem];
-                    sumWy_elem = this.spatialDisc_.lsGradQR_!.sumWy1_[elem];
                     wx_elemToNeighbor = this.spatialDisc_.lsGradQR_!.wxFinal1_[face];
                     wy_elemToNeighbor = this.spatialDisc_.lsGradQR_!.wyFinal1_[face];
+                    wx_neighborToElem = this.spatialDisc_.lsGradQR_!.wxFinal2_[face];
+                    wy_neighborToElem = this.spatialDisc_.lsGradQR_!.wyFinal2_[face];
                 } else {
                     // elem is elem2, using weights from perspective 2
-                    sumWx_elem = this.spatialDisc_.lsGradQR_!.sumWx2_[elem];
-                    sumWy_elem = this.spatialDisc_.lsGradQR_!.sumWy2_[elem];
                     wx_elemToNeighbor = this.spatialDisc_.lsGradQR_!.wxFinal2_[face];
                     wy_elemToNeighbor = this.spatialDisc_.lsGradQR_!.wyFinal2_[face];
+                    wx_neighborToElem = this.spatialDisc_.lsGradQR_!.wxFinal1_[face];
+                    wy_neighborToElem = this.spatialDisc_.lsGradQR_!.wyFinal1_[face];
                 }
                 
-                // Diagonal contribution from d(V_face · n)/d(phi_elem):
-                // From d(gradPhi_elem)/d(phi_elem) = -sumW_elem
-                // Contribution: 0.5 * (-sumWx*nx - sumWy*ny)
-                const diag_contrib = 0.5 * (-sumWx_elem * nx - sumWy_elem * ny);
-                diag += sign * diag_contrib * area;
+                // Check if this is a boundary face (neighbor is ghost cell)
+                const isInteriorFace = neighbor <= this.spatialDisc_.nelemDomain_;
+                const isWallFace = this.spatialDisc_.wallFaceSet_.contains(face);
                 
-                // Off-diagonal contribution from d(res_elem)/d(phi_neighbor):
-                // 1. From d(gradPhi_elem)/d(phi_neighbor) = w_elemToNeighbor
-                //    Contribution: 0.5 * (wx*nx + wy*ny)
-                // 2. From d(gradPhi_neighbor)/d(phi_neighbor) = -sumW_neighbor
-                //    Contribution: 0.5 * (-sumWx_neigh*nx - sumWy_neigh*ny)
-                
-                var offdiag = 0.0;
-                
-                // Contribution from gradient of elem using neighbor
-                offdiag += 0.5 * (wx_elemToNeighbor * nx + wy_elemToNeighbor * ny);
-                
-                // Contribution from gradient of neighbor (need neighbor's sum weights)
-                if neighbor <= this.spatialDisc_.nelemDomain_ {
-                    var sumWx_neighbor: real(64);
-                    var sumWy_neighbor: real(64);
+                if isInteriorFace {
+                    // === INTERIOR FACE ===
+                    // V_avg = 0.5*(V_elem + V_neighbor)
+                    // flux·n = 0.5*(gradPhi_elem + gradPhi_neighbor)·m + directCoeff*(phi_neighbor - phi_elem)
                     
-                    if elem1 == neighbor {
-                        sumWx_neighbor = this.spatialDisc_.lsGradQR_!.sumWx1_[neighbor];
-                        sumWy_neighbor = this.spatialDisc_.lsGradQR_!.sumWy1_[neighbor];
-                    } else {
-                        sumWx_neighbor = this.spatialDisc_.lsGradQR_!.sumWx2_[neighbor];
-                        sumWy_neighbor = this.spatialDisc_.lsGradQR_!.sumWy2_[neighbor];
-                    }
-                    offdiag += 0.5 * (-sumWx_neighbor * nx - sumWy_neighbor * ny);
-                }
-                
-                // Apply sign and area
-                offdiag *= sign * area;
-                
-                // Add to matrix (only for interior neighbors)
-                if neighbor <= this.spatialDisc_.nelemDomain_ {
+                    // === DIAGONAL CONTRIBUTION ===
+                    // From d(0.5*(gradPhi_elem · m))/d(phi_elem) = 0.5 * (-sumW_elem · m)
+                    var face_diag = 0.5 * (-sumWx_elem * mx - sumWy_elem * my);
+                    
+                    // From d(0.5*(gradPhi_neighbor · m))/d(phi_elem) = 0.5 * (w_neighborToElem · m)
+                    face_diag += 0.5 * (wx_neighborToElem * mx + wy_neighborToElem * my);
+                    
+                    // Apply sign and area to gradient terms
+                    diag += sign * face_diag * area;
+                    
+                    // Direct phi term: d((phi_2 - phi_1) * directCoeff)/d(phi_elem)
+                    diag -= directCoeff * area;
+                    
+                    // === OFF-DIAGONAL CONTRIBUTION ===
+                    const sumWx_neighbor = this.spatialDisc_.lsGradQR_!.sumWx_[neighbor];
+                    const sumWy_neighbor = this.spatialDisc_.lsGradQR_!.sumWy_[neighbor];
+                    
+                    // From d(0.5*(gradPhi_elem · m))/d(phi_neighbor) = 0.5 * (w_elemToNeighbor · m)
+                    var offdiag = 0.5 * (wx_elemToNeighbor * mx + wy_elemToNeighbor * my);
+                    
+                    // From d(0.5*(gradPhi_neighbor · m))/d(phi_neighbor) = 0.5 * (-sumW_neighbor · m)
+                    offdiag += 0.5 * (-sumWx_neighbor * mx - sumWy_neighbor * my);
+                    
+                    // Apply sign and area to gradient terms
+                    offdiag *= sign * area;
+                    
+                    // Direct phi term
+                    offdiag += directCoeff * area;
+                    
                     this.A_petsc.add(elem-1, neighbor-1, offdiag);
+                    
+                } else if isWallFace {
+                    // === WALL BOUNDARY FACE ===
+                    // Wall BC: phi_ghost = phi_interior (Neumann)
+                    //          V_ghost = V_int - 2*(V_int·n)*n (mirror velocity)
+                    //
+                    // This gives: V_avg = V_int - (V_int·n)*n (tangential projection)
+                    // And: V_avg · m = V_int · m_wall, where m_wall = m - (n·m)*n
+                    //
+                    // The interior gradient includes ghost as neighbor:
+                    //   gradPhi_int = sum_k w_ik * (phi_k - phi_int)
+                    //   d(gradPhi_int)/d(phi_int) = -sumW_int + w_int_to_ghost * d(phi_ghost)/d(phi_int)
+                    //                             = -sumW_int + w_elemToNeighbor * 1
+                    //
+                    // So the diagonal contribution is:
+                    //   d(V_avg · m)/d(phi_int) = d(V_int · m_wall)/d(phi_int)
+                    //                          = (-sumW_int + w_elemToNeighbor) · m_wall
+                    
+                    // Compute m_wall = m - (n·m)*n (tangential projection of effective normal)
+                    const nDotM = nx * mx + ny * my;
+                    const mWallX = mx - nDotM * nx;
+                    const mWallY = my - nDotM * ny;
+                    
+                    // Diagonal contribution from d(gradPhi_elem)/d(phi_elem)
+                    // Note: includes correction for d(phi_ghost)/d(phi_int) = 1
+                    var face_diag = (-sumWx_elem + wx_elemToNeighbor) * mWallX 
+                                  + (-sumWy_elem + wy_elemToNeighbor) * mWallY;
+                    
+                    // Apply sign and area
+                    diag += sign * face_diag * area;
+                    
+                    // No direct phi term for wall since phi_ghost = phi_int → delta_phi = 0
+                    // No off-diagonal since ghost is not a real DOF
+                    
+                } else {
+                    // === FARFIELD BOUNDARY FACE ===
+                    // Farfield BC: phi_ghost = U_inf*x + V_inf*y (Dirichlet, fixed)
+                    //              V_ghost = 2*V_inf - V_int
+                    //
+                    // This gives: V_avg = V_inf (constant, no phi dependency)
+                    //
+                    // The interior gradient includes ghost as neighbor:
+                    //   gradPhi_int includes w_int_to_ghost * (phi_ghost - phi_int)
+                    //   d(gradPhi_int)/d(phi_int) = -sumW_int + w_int_to_ghost * 0 = -sumW_int
+                    //   (phi_ghost is fixed, so d(phi_ghost)/d(phi_int) = 0)
+                    //
+                    // However, the averaged velocity V_avg = V_inf is constant, so the flux
+                    // at farfield faces doesn't depend on interior phi through the gradient.
+                    // The only dependency is through the direct term.
+                    
+                    // Diagonal contribution from d(0.5*(gradPhi_elem · m))/d(phi_elem)
+                    // V_avg = V_inf is constant, but we still have the correction term
+                    // delta = V_avg · t - dPhi/dL, and dPhi = phi_ghost - phi_int
+                    // where phi_ghost is fixed
+                    
+                    // Actually for farfield, V_avg = V_inf (constant), so V_avg · m is constant
+                    // The only contribution is from the direct term: k*invL*(phi_ghost - phi_int)
+                    // d/d(phi_int) = -k*invL = -directCoeff
+                    
+                    // Apply sign and area for direct term only
+                    diag -= directCoeff * area;
                 }
             }
             
@@ -204,20 +297,21 @@ class temporalDiscretization {
         }
         
         this.A_petsc.assemblyComplete();
-        this.A_petsc.matView();
+        // this.A_petsc.matView();
     }
 
     proc initialize() {
         this.spatialDisc_.initializeMetrics();
         this.spatialDisc_.initializeSolution();
         this.initializeJacobian();
+        this.computeJacobian();
     }
 
     proc solve() {
-        var res: real(64) = 1e12;
+        var normalized_res: real(64) = 1e12;
         var first_res : real(64) = 1e12;
         var time: stopwatch;
-        while (res > this.inputs_.CONV_TOL_ && this.it_ < this.inputs_.IT_MAX_ && isNan(res) == false) {
+        while (normalized_res > this.inputs_.CONV_TOL_ && this.it_ < this.inputs_.IT_MAX_ && isNan(normalized_res) == false) {
             this.it_ += 1;
             time.start();
 
@@ -228,23 +322,30 @@ class temporalDiscretization {
             }
             this.b_petsc.assemblyComplete();
 
-            GMRES(this.ksp, this.A_petsc, this.b_petsc, this.x_petsc);
+            const (its, reason) = GMRES(this.ksp, this.A_petsc, this.b_petsc, this.x_petsc);
 
             forall elem in 1..this.spatialDisc_.nelemDomain_ {
                 this.spatialDisc_.phi_[elem] += this.x_petsc.get(elem-1);
             }
 
-            res = RMSE(this.spatialDisc_.res_, this.spatialDisc_.elemVolume_);
+            const res = RMSE(this.spatialDisc_.res_, this.spatialDisc_.elemVolume_);
             if this.it_ == 1 {
                 first_res = res;
             }
+
+            normalized_res = res / first_res;
+
+            const res_wall = RMSE(this.spatialDisc_.res_[this.spatialDisc_.wall_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.wall_dom]);
+            const res_fluid = RMSE(this.spatialDisc_.res_[this.spatialDisc_.fluid_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.fluid_dom]);
 
             const (Cl, Cd, Cm) = this.spatialDisc_.computeAerodynamicCoefficients();
             time.stop();
             const elapsed = time.elapsed();
             writeln(" Time: ", elapsed, " It: ", this.it_,
-                    " Residual: ", res, " normalized Residual: ", res / first_res,
-                    " Cl: ", Cl, " Cd: ", Cd, " Cm: ", Cm);
+                    " res: ", res, " norm res: ", normalized_res,
+                    " res wall: ", res_wall, " res fluid: ", res_fluid,
+                    " Cl: ", Cl, " Cd: ", Cd, " Cm: ", Cm, 
+                    " GMRES its: ", its, " reason: ", reason);
 
             this.timeList_.pushBack(elapsed);
             this.itList_.pushBack(this.it_);

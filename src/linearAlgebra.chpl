@@ -35,7 +35,7 @@ proc GMRES(ref ksp: PETSCksp_c, const ref A: PETSCmatrix_c, const ref b: PETSCve
     // if reason < 0 {
     //     writeln("GMRES did not converge, reason: ", reason);
     // }
-    write("GMRES converged in ", its, " iterations, reason: ", reason, " ");
+    return (its, reason);
 
 }
 

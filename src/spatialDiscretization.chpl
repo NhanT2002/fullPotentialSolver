@@ -66,6 +66,10 @@ class spatialDiscretization {
 
     var circulation_ : real(64);
 
+    var wall_dom: sparse subdomain(elemDomain_dom); // cell next to wall boundary
+    var fluid_dom: sparse subdomain(elemDomain_dom); // all other cells without wall_dom
+    var wallFaceSet_: set(int);  // Set of wall face indices for efficient lookup
+
     proc init(Mesh: shared MeshData, ref inputs: potentialInputs) {
         this.mesh_ = Mesh;
         this.inputs_ = inputs;
@@ -84,6 +88,22 @@ class spatialDiscretization {
     }
 
     proc initializeMetrics() {
+        for face in this.mesh_.edgeWall_ {
+            const elem1 = this.mesh_.edge2elem_[1, face];
+            const elem2 = this.mesh_.edge2elem_[2, face];
+            if elem1 <= this.nelemDomain_ {
+                this.wall_dom += elem1;
+            }
+            else {
+                this.wall_dom += elem2;
+            }
+            this.wallFaceSet_.add(face);  // Add to wall face set for Jacobian
+        }
+        for elem in 1..this.nelemDomain_ {
+            this.fluid_dom += elem;
+        }
+        this.fluid_dom -= this.wall_dom;
+
         // Compute element centroids and volumes in a single pass
         forall elem in 1..this.nelemDomain_ {
             const nodeStart = this.mesh_.elem2nodeIndex_[elem] + 1;
@@ -519,7 +539,7 @@ class spatialDiscretization {
         fields["VelocityY"] = vv;
         fields["VelocityZ"] = ww;
         fields["rho"] = rhorho;
-        fields["Pressure"] = pp;
+        fields["cp"] = pp;
         fields["res"] = resres;
         fields["mach"] = machmach;
         fields["xElem"] = xElem;
@@ -585,7 +605,7 @@ class spatialDiscretization {
         fieldsWall["uWall"] = uWall;
         fieldsWall["vWall"] = vWall;
         fieldsWall["rhoWall"] = rhoWall;
-        fieldsWall["pressureWall"] = pWall;
+        fieldsWall["cpWall"] = pWall;
         fieldsWall["machWall"] = machWall;
         fieldsWall["xWall"] = xWall;
         fieldsWall["yWall"] = yWall;
@@ -627,7 +647,7 @@ class spatialDiscretization {
         fields["VelocityY"] = vv;
         fields["VelocityZ"] = ww;
         fields["rho"] = rhorho;
-        fields["Pressure"] = pp;
+        fields["cp"] = pp;
         fields["res"] = resres;
         fields["mach"] = machmach;
         fields["xElem"] = xElem;
@@ -693,7 +713,7 @@ class spatialDiscretization {
         fieldsWall["uWall"] = uWall;
         fieldsWall["vWall"] = vWall;
         fieldsWall["rhoWall"] = rhoWall;
-        fieldsWall["pressureWall"] = pWall;
+        fieldsWall["cpWall"] = pWall;
         fieldsWall["machWall"] = machWall;
         fieldsWall["xWall"] = xWall;
         fieldsWall["yWall"] = yWall;

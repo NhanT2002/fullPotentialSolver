@@ -234,10 +234,8 @@ class LeastSquaresGradientQR {
     var nelemDomain_: int;
 
     var elem_dom: domain(1) = {1..0};
-    var sumWx1_: [elem_dom] real(64);  // Sum of wx weights per elem (for Jacobian)
-    var sumWy1_: [elem_dom] real(64);  // Sum of wy weights per elem
-    var sumWx2_: [elem_dom] real(64);  // Sum of wx weights per elem (for Jacobian)
-    var sumWy2_: [elem_dom] real(64);  // Sum of wy weights per elem
+    var sumWx_: [elem_dom] real(64);  // Sum of wx weights per elem (for Jacobian)
+    var sumWy_: [elem_dom] real(64);  // Sum of wy weights per elem
     
     // Precomputed final weights per face, for both perspectives
     // wxFinal1_[face] = weight for elem1 computing gradient using elem2 as neighbor
@@ -389,18 +387,23 @@ class LeastSquaresGradientQR {
         // Compute sum of final weights for Jacobian computation
         forall elem in 1..this.nelemDomain_ {
             const faces = this.mesh_.elem2edge_[this.mesh_.elem2edgeIndex_[elem] + 1 .. 
-                                                 this.mesh_.elem2edgeIndex_[elem + 1]];            
+                                                 this.mesh_.elem2edgeIndex_[elem + 1]];
+            
+            var gx = 0.0, gy = 0.0;         
             for face in faces {
                 const elem1 = this.mesh_.edge2elem_[1, face];
                 const elem2 = this.mesh_.edge2elem_[2, face];
                 if elem == elem1 {
-                    this.sumWx1_[elem] += this.wxFinal1_[face];
-                    this.sumWy1_[elem] += this.wyFinal1_[face];
+                    gx += this.wxFinal1_[face];
+                    gy += this.wyFinal1_[face];
                 } else {
-                    this.sumWx2_[elem] += this.wxFinal2_[face];
-                    this.sumWy2_[elem] += this.wyFinal2_[face];
+                    gx += this.wxFinal2_[face];
+                    gy += this.wyFinal2_[face];
                 }
             }
+
+            this.sumWx_[elem] = gx;
+            this.sumWy_[elem] = gy;
         }
     }
     
