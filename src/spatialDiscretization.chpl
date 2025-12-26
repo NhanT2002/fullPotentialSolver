@@ -34,6 +34,20 @@ class spatialDiscretization {
     var elemCentroidX_: [elem_dom] real(64);
     var elemCentroidY_: [elem_dom] real(64);
     var elemVolume_: [elem_dom] real(64);
+    var kuttaCell_: [elem_dom] int; // 1 if over wake, -1 if under wake, 9 otherwise
+
+    
+    var TEnode_: int;
+    var TEnodeXcoord_: real(64);
+    var TEnodeYcoord_: real(64);
+    var upperTEface_: int;
+    var lowerTEface_: int;
+    var upperTEelem_: int;
+    var lowerTEelem_: int;
+    var deltaSupperTEx_: real(64);
+    var deltaSupperTEy_: real(64);
+    var deltaSlowerTEx_: real(64);
+    var deltaSlowerTEy_: real(64);
 
     var face_dom: domain(1) = {1..0};
     var faceCentroidX_: [face_dom] real(64);
@@ -68,6 +82,7 @@ class spatialDiscretization {
 
     var wall_dom: sparse subdomain(elemDomain_dom); // cell next to wall boundary
     var fluid_dom: sparse subdomain(elemDomain_dom); // all other cells without wall_dom
+    var wake_dom: sparse subdomain(elemDomain_dom); // cells next to wake
     var wallFaceSet_: set(int);  // Set of wall face indices for efficient lookup
 
     proc init(Mesh: shared MeshData, ref inputs: potentialInputs) {
@@ -257,6 +272,79 @@ class spatialDiscretization {
         this.lsGradQR_!.precompute(this.elemCentroidX_, this.elemCentroidY_);
     }
 
+    proc initializeKuttaCells() {
+        for face in this.mesh_.edgeWall_ {
+            for p in this.mesh_.edge2node_[1.., face] {
+                const x = this.mesh_.X_[p];
+                const y = this.mesh_.Y_[p];
+
+                if x > this.TEnodeXcoord_ {
+                    this.TEnode_ = p;
+                    this.TEnodeXcoord_ = x;
+                    this.TEnodeYcoord_ = y;
+                }
+            }
+        }
+        for face in this.mesh_.edgeWall_ {
+            const p1 = this.mesh_.edge2node_[1, face];
+            const p2 = this.mesh_.edge2node_[2, face];
+
+            if p1 == this.TEnode_ || p2 == this.TEnode_ {
+                if this.faceCentroidY_[face] >= 0.0 {
+                    this.upperTEface_ = face;
+                }
+                if this.faceCentroidY_[face] <= 0.0 {
+                    this.lowerTEface_ = face;
+                }
+            }
+        }
+        this.upperTEelem_ = this.mesh_.edge2elem_[1, this.upperTEface_];
+        this.lowerTEelem_ = this.mesh_.edge2elem_[1, this.lowerTEface_];
+        writeln("T.E. node: ", this.TEnode_, " at (", this.TEnodeXcoord_, ", ", this.TEnodeYcoord_, ")");
+        writeln("Upper T.E. face: ", this.upperTEface_, " elem: ", this.upperTEelem_);
+        writeln("Lower T.E. face: ", this.lowerTEface_, " elem: ", this.lowerTEelem_);
+        this.kuttaCell_ = 9;
+        // Define wake line between (x3, y3) and a far downstream point
+        const x3 = this.TEnodeXcoord_;
+        const y3 = this.TEnodeYcoord_;
+        const x4 = this.TEnodeXcoord_ + 1000.0;
+        const y4 = this.TEnodeYcoord_;
+        forall elem in 1..this.nelemDomain_ {
+            const x = this.elemCentroidX_[elem];
+            const y = this.elemCentroidY_[elem];
+            if x <= this.TEnodeXcoord_ {
+                this.kuttaCell_[elem] = 9;
+            }
+            else {
+                const signedArea = (x4 - x3)*(y - y3) - (y4 - y3)*(x - x3);
+                if signedArea >= 0.0 {
+                    this.kuttaCell_[elem] = 1;
+                }
+                else if signedArea < 0.0 {
+                    this.kuttaCell_[elem] = -1;
+                }
+
+            }
+        }
+        for face in 1..this.nface_ {
+            const elem1 = this.mesh_.edge2elem_[1, face];
+            const elem2 = this.mesh_.edge2elem_[2, face];
+            if ( (this.kuttaCell_[elem1] == 1 && this.kuttaCell_[elem2] == -1) ||
+               (this.kuttaCell_[elem1] == -1 && this.kuttaCell_[elem2] == 1) ) {
+                this.wake_dom += elem1;
+                this.wake_dom += elem2;
+            }
+        }
+
+        
+
+        this.deltaSupperTEx_ = this.TEnodeXcoord_ - this.faceCentroidX_[this.upperTEface_];
+        this.deltaSupperTEy_ = this.TEnodeYcoord_ - this.faceCentroidY_[this.upperTEface_];
+
+        this.deltaSlowerTEx_ = this.TEnodeXcoord_ - this.faceCentroidX_[this.lowerTEface_];
+        this.deltaSlowerTEy_ = this.TEnodeYcoord_ - this.faceCentroidY_[this.lowerTEface_];
+    }
+
     proc initializeSolution() {
         forall elem in 1..this.nelem_ {
             this.uu_[elem] = this.inputs_.U_INF_;
@@ -290,9 +378,17 @@ class spatialDiscretization {
             // Determine which element is interior and which is ghost
             const (interiorElem, ghostElem) = 
                 if elem1 <= this.nelemDomain_ then (elem1, elem2) else (elem2, elem1);
+
+            const x = this.elemCentroidX_[ghostElem];
+            const y = this.elemCentroidY_[ghostElem];
+            var theta = atan2(y - this.inputs_.Y_REF_, x - this.inputs_.X_REF_);
+            if theta < 0.0 {
+                theta += 2.0 * pi;
+            }
             
-            this.phi_[ghostElem] = this.inputs_.U_INF_ * this.elemCentroidX_[ghostElem] +
-                                  this.inputs_.V_INF_ * this.elemCentroidY_[ghostElem];
+            // this.phi_[ghostElem] = this.inputs_.U_INF_ * x + this.inputs_.V_INF_ * y + this.circulation_ * theta / (2.0 * pi);
+            
+            this.phi_[ghostElem] = this.inputs_.U_INF_ * x + this.inputs_.V_INF_ * y;
         }
         
         forall face in this.mesh_.edgeWall_ do updateWallGhostPhi(face);
@@ -329,12 +425,31 @@ class spatialDiscretization {
                 if elem1 <= this.nelemDomain_ then (elem1, elem2) else (elem2, elem1);
             
             // Impose U_INF, V_INF at face --> u_face = (u_interior + u_ghost)/2 = U_INF --> u_ghost = 2*U_INF - u_interior
-            this.uu_[ghostElem] = 2*this.inputs_.U_INF_ - this.uu_[interiorElem];
-            this.vv_[ghostElem] = 2*this.inputs_.V_INF_ - this.vv_[interiorElem];
+            const x = this.faceCentroidX_[face];
+            const y = this.faceCentroidY_[face];
+            // const u_face = this.inputs_.U_INF_ - this.circulation_ / (2.0 * pi) * (y - this.inputs_.Y_REF_) / ((x - this.inputs_.X_REF_)*(x - this.inputs_.X_REF_) + (y - this.inputs_.Y_REF_)*(y - this.inputs_.Y_REF_));
+            // const v_face = this.inputs_.V_INF_ + this.circulation_ / (2.0 * pi) * (x - this.inputs_.X_REF_) / ((x - this.inputs_.X_REF_)*(x - this.inputs_.X_REF_) + (y - this.inputs_.Y_REF_)*(y - this.inputs_.Y_REF_));
+            const u_face = this.inputs_.U_INF_;
+            const v_face = this.inputs_.V_INF_;
+            this.uu_[ghostElem] = 2*u_face - this.uu_[interiorElem];
+            this.vv_[ghostElem] = 2*v_face - this.vv_[interiorElem];
         }
         
         forall face in this.mesh_.edgeWall_ do updateWallGhostVelocity(face);
         forall face in this.mesh_.edgeFarfield_ do updateFarfieldGhostVelocity(face);
+    }
+
+    proc computeCirculation() {
+        const upperTEelem2 = this.mesh_.edge2elem_[2, this.upperTEface_];
+        const lowerTEelem2 = this.mesh_.edge2elem_[2, this.lowerTEface_];
+
+        const phiUpperTEface = 0.5*(this.phi_[this.upperTEelem_] + this.phi_[upperTEelem2]);
+        const phiLowerTEface = 0.5*(this.phi_[this.lowerTEelem_] + this.phi_[lowerTEelem2]);
+
+        const phiUpperTE = phiUpperTEface + (this.uFace_[this.upperTEface_]*this.deltaSupperTEx_ + this.vFace_[this.upperTEface_]*this.deltaSupperTEy_);
+        const phiLowerTE = phiLowerTEface + (this.uFace_[this.lowerTEface_]*this.deltaSlowerTEx_ + this.vFace_[this.lowerTEface_]*this.deltaSlowerTEy_);
+
+        this.circulation_ = phiUpperTE - phiLowerTE;
     }
 
     proc computeGradientGreenGauss(ref phi: [] real(64), 
@@ -399,7 +514,7 @@ class spatialDiscretization {
     }
 
     proc computeVelocityFromPhiLeastSquaresQR() {
-        this.lsGradQR_!.computeGradient(this.phi_, this.uu_, this.vv_);
+        this.lsGradQR_!.computeGradient(this.phi_, this.uu_, this.vv_, this.kuttaCell_, this.circulation_);
     }
 
     proc computeFluxes() {
@@ -421,8 +536,26 @@ class spatialDiscretization {
             const uAvg = 0.5 * (this.uu_[elem1] + this.uu_[elem2]);
             const vAvg = 0.5 * (this.vv_[elem1] + this.vv_[elem2]);
 
-            // Directional derivative of phi (direct difference)
-            const dPhidl = (this.phi_[elem2] - this.phi_[elem1]) * this.invL_IJ_[face];
+            // Get phi values with potential jump across wake
+            var phi1 = this.phi_[elem1];
+            var phi2 = this.phi_[elem2];
+            
+            // Apply circulation correction for wake-crossing faces
+            // From elem1's perspective looking at elem2
+            const kuttaType1 = this.kuttaCell_[elem1];
+            const kuttaType2 = this.kuttaCell_[elem2];
+            if (kuttaType1 == 1 && kuttaType2 == -1) {
+                // elem1 is above wake, elem2 is below wake
+                // To get continuous potential, add Γ to lower surface value
+                phi2 += this.circulation_;
+            } else if (kuttaType1 == -1 && kuttaType2 == 1) {
+                // elem1 is below wake, elem2 is above wake
+                // To get continuous potential, subtract Γ from upper surface value
+                phi2 -= this.circulation_;
+            }
+
+            // Directional derivative of phi (direct difference with jump correction)
+            const dPhidl = (phi2 - phi1) * this.invL_IJ_[face];
 
             // Averaged velocity projected onto cell-to-cell direction
             const vDotT = uAvg * this.t_IJ_x_[face] + vAvg * this.t_IJ_y_[face];
@@ -458,10 +591,10 @@ class spatialDiscretization {
             var res = 0.0;
             for face in faces {
                 const elem1 = this.mesh_.edge2elem_[1, face];
-                
+
                 // Sign: +1 if we are elem1 (flux outward), -1 if we are elem2
                 const sign = if elem1 == elem then 1.0 else -1.0;
-                
+
                 res += sign * this.flux_[face];
             }
             this.res_[elem] = res;
@@ -519,6 +652,7 @@ class spatialDiscretization {
         var machmach: [dom] real(64);
         var xElem: [dom] real(64);
         var yElem: [dom] real(64);
+        var kuttaCell: [dom] int;
 
         forall elem in 1..this.nelemDomain_ {
             phi[elem-1] = this.phi_[elem];
@@ -530,7 +664,7 @@ class spatialDiscretization {
             machmach[elem-1] = this.mach(this.uu_[elem], this.vv_[elem], this.rhorho_[elem]);
             xElem[elem-1] = this.elemCentroidX_[elem];
             yElem[elem-1] = this.elemCentroidY_[elem];
-
+            kuttaCell[elem-1] = this.kuttaCell_[elem];
         }
 
         var fields = new map(string, [dom] real(64));
@@ -544,6 +678,7 @@ class spatialDiscretization {
         fields["mach"] = machmach;
         fields["xElem"] = xElem;
         fields["yElem"] = yElem;
+        fields["kuttaCell"] = kuttaCell;
 
         var writer = new owned potentialFlowWriter_c(this.inputs_.OUTPUT_FILENAME_);
 
@@ -627,6 +762,7 @@ class spatialDiscretization {
         var machmach: [dom] real(64);
         var xElem: [dom] real(64);
         var yElem: [dom] real(64);
+        var kuttaCell: [dom] int;
 
         forall elem in 1..this.nelemDomain_ {
             phi[elem-1] = this.phi_[elem];
@@ -638,7 +774,7 @@ class spatialDiscretization {
             machmach[elem-1] = this.mach(this.uu_[elem], this.vv_[elem], this.rhorho_[elem]);
             xElem[elem-1] = this.elemCentroidX_[elem];
             yElem[elem-1] = this.elemCentroidY_[elem];
-
+            kuttaCell[elem-1] = this.kuttaCell_[elem];
         }
 
         var fields = new map(string, [dom] real(64));
@@ -652,6 +788,7 @@ class spatialDiscretization {
         fields["mach"] = machmach;
         fields["xElem"] = xElem;
         fields["yElem"] = yElem;
+        fields["kuttaCell"] = kuttaCell;
 
         var writer = new owned potentialFlowWriter_c(this.inputs_.OUTPUT_FILENAME_);
 

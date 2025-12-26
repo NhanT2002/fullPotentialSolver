@@ -412,7 +412,9 @@ class LeastSquaresGradientQR {
      */
     proc computeGradient(ref phi: [] real(64), 
                          ref gradX: [] real(64), 
-                         ref gradY: [] real(64)) {
+                         ref gradY: [] real(64),
+                         ref kuttaCell_: [] int,
+                         ref circulation_: real(64)) {
         
         forall elem in 1..this.nelemDomain_ {
             const faces = this.mesh_.elem2edge_[this.mesh_.elem2edgeIndex_[elem] + 1 .. 
@@ -425,7 +427,24 @@ class LeastSquaresGradientQR {
                 const elem1 = this.mesh_.edge2elem_[1, face];
                 const elem2 = this.mesh_.edge2elem_[2, face];
                 const neighbor = if elem1 == elem then elem2 else elem1;
-                const dphi = phi[neighbor] - phiI;
+
+                var phiJ = phi[neighbor];
+
+                const elemKuttaType = kuttaCell_[elem];
+                const neighborKuttaType = kuttaCell_[neighbor];
+                if (elemKuttaType == 1 && neighborKuttaType == -1) {
+                    // Elem is above wake, neighbor is below wake
+                    // To get continuous potential, add Γ to lower surface value
+                    // φ_seen = φ_lower + Γ = φ_upper
+                    phiJ += circulation_;
+                } else if (elemKuttaType == -1 && neighborKuttaType == 1) {
+                    // Elem is below wake, neighbor is above wake
+                    // To get continuous potential, subtract Γ from upper surface value
+                    // φ_seen = φ_upper - Γ = φ_lower
+                    phiJ -= circulation_;
+                }
+
+                const dphi = phiJ - phiI;
                 
                 // Use precomputed weights for correct perspective
                 if elem == elem1 {

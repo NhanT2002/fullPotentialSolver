@@ -18,6 +18,9 @@ class temporalDiscretization {
     var inputs_: potentialInputs;
     var it_: int = 0;
     
+    // Index for circulation DOF (last row/column) - must be before A_petsc for init order
+    var gammaIndex_: int;
+    
     var A_petsc : owned PETSCmatrix_c;
     var x_petsc : owned PETSCvector_c;
     var b_petsc : owned PETSCvector_c;
@@ -31,19 +34,30 @@ class temporalDiscretization {
     var cmList_ = new list(real(64));
     var circulationList_ = new list(real(64));
 
+    // Gradient sensitivity to circulation: ∂(∇φ)/∂Γ for each cell
+    // These capture how each cell's gradient depends on Γ through wake-crossing faces
+    var gradSensitivity_dom: domain(1) = {1..0};
+    var dgradX_dGamma_: [gradSensitivity_dom] real(64);
+    var dgradY_dGamma_: [gradSensitivity_dom] real(64);
+
     proc init(spatialDisc: shared spatialDiscretization, ref inputs: potentialInputs) {
         writeln("Initializing temporal discretization...");
         this.spatialDisc_ = spatialDisc;
         this.inputs_ = inputs;
 
-        const M = spatialDisc.nelemDomain_;
-        const N = spatialDisc.nelemDomain_;
+        // Add 1 extra DOF for circulation Γ
+        const M = spatialDisc.nelemDomain_ + 1;
+        const N = spatialDisc.nelemDomain_ + 1;
+        this.gammaIndex_ = spatialDisc.nelemDomain_;  // 0-based index for Γ
+        
         this.A_petsc = new owned PETSCmatrix_c(PETSC_COMM_SELF, "seqaij", M, M, N, N);
         this.x_petsc = new owned PETSCvector_c(PETSC_COMM_SELF, N, N, 0.0, "seq");
         this.b_petsc = new owned PETSCvector_c(PETSC_COMM_SELF, N, N, 0.0, "seq");
 
         var nnz : [0..M-1] PetscInt;
         nnz = 4*(this.spatialDisc_.mesh_.elem2edge_[this.spatialDisc_.mesh_.elem2edgeIndex_[1] + 1 .. this.spatialDisc_.mesh_.elem2edgeIndex_[1 + 1]].size + 1);
+        // Γ row has connections to TE cells only
+        nnz[M-1] = 5;
         A_petsc.preAllocate(nnz);
 
         this.ksp = new owned PETSCksp_c(PETSC_COMM_SELF, "gmres");
@@ -75,6 +89,9 @@ class temporalDiscretization {
             writeln("No preconditioner for GMRES");
             this.ksp.setPreconditioner("none");
         }
+
+        // Initialize gradient sensitivity arrays
+        this.gradSensitivity_dom = {1..spatialDisc.nelemDomain_};
     }
 
     proc initializeJacobian() {
@@ -89,10 +106,108 @@ class temporalDiscretization {
                     this.A_petsc.set(elem-1, neighbor-1, 0.0);
                 }
             }
+            // Initialize dRes_i/dΓ column entries for wake-adjacent cells
+            this.A_petsc.set(elem-1, this.gammaIndex_, 0.0);
+        }
+        
+        // Initialize Γ row (Kutta condition): Γ - (φ_upper - φ_lower) = 0
+        // dKutta/dΓ = 1
+        this.A_petsc.set(this.gammaIndex_, this.gammaIndex_, 0.0);
+        // dKutta/dφ_upperTE = -1
+        this.A_petsc.set(this.gammaIndex_, this.spatialDisc_.upperTEelem_ - 1, 0.0);
+        // dKutta/dφ_lowerTE = +1
+        this.A_petsc.set(this.gammaIndex_, this.spatialDisc_.lowerTEelem_ - 1, 0.0);
+        // Also need ghost cells for TE faces
+        const upperTEelem2 = this.spatialDisc_.mesh_.edge2elem_[2, this.spatialDisc_.upperTEface_];
+        const lowerTEelem2 = this.spatialDisc_.mesh_.edge2elem_[2, this.spatialDisc_.lowerTEface_];
+        if upperTEelem2 <= this.spatialDisc_.nelemDomain_ {
+            this.A_petsc.set(this.gammaIndex_, upperTEelem2 - 1, 0.0);
+        }
+        if lowerTEelem2 <= this.spatialDisc_.nelemDomain_ {
+            this.A_petsc.set(this.gammaIndex_, lowerTEelem2 - 1, 0.0);
         }
 
         this.A_petsc.assemblyComplete();
         // this.A_petsc.matView();
+    }
+
+    proc computeGradientSensitivity() {
+        // Compute ∂(∇φ)/∂Γ for each cell.
+        // This captures how each cell's gradient depends on circulation through
+        // its wake-crossing faces.
+        //
+        // For cell I with gradient: ∇φ_I = Σ_k w_Ik * (φ_k_corrected - φ_I)
+        // where φ_k_corrected includes the Γ correction for wake-crossing neighbors:
+        //   - If I above (1), k below (-1): φ_k_corrected = φ_k + Γ
+        //   - If I below (-1), k above (1): φ_k_corrected = φ_k - Γ
+        //
+        // Therefore: ∂(∇φ_I)/∂Γ = Σ_{k: wake-crossing} w_Ik * (±1)
+
+        // Reset arrays
+        this.dgradX_dGamma_ = 0.0;
+        this.dgradY_dGamma_ = 0.0;
+
+        forall elem in 1..this.spatialDisc_.nelemDomain_ {
+            const kuttaType_elem = this.spatialDisc_.kuttaCell_[elem];
+
+            // Only cells in wake region (above=1 or below=-1) can have wake-crossing faces
+            if kuttaType_elem == 1 || kuttaType_elem == -1 {
+                const faces = this.spatialDisc_.mesh_.elem2edge_[
+                    this.spatialDisc_.mesh_.elem2edgeIndex_[elem] + 1 ..
+                    this.spatialDisc_.mesh_.elem2edgeIndex_[elem + 1]];
+
+                var dgx = 0.0, dgy = 0.0;
+
+                for face in faces {
+                    const elem1 = this.spatialDisc_.mesh_.edge2elem_[1, face];
+                    const elem2 = this.spatialDisc_.mesh_.edge2elem_[2, face];
+                    const neighbor = if elem1 == elem then elem2 else elem1;
+
+                    const kuttaType_neighbor = this.spatialDisc_.kuttaCell_[neighbor];
+
+                    // Check if this is a wake-crossing face
+                    const isWakeCrossing = (kuttaType_elem == 1 && kuttaType_neighbor == -1) ||
+                                           (kuttaType_elem == -1 && kuttaType_neighbor == 1);
+
+                    if isWakeCrossing {
+                        // Get weight from elem to neighbor
+                        var wx, wy: real(64);
+                        if elem == elem1 {
+                            wx = this.spatialDisc_.lsGradQR_!.wxFinal1_[face];
+                            wy = this.spatialDisc_.lsGradQR_!.wyFinal1_[face];
+                        } else {
+                            wx = this.spatialDisc_.lsGradQR_!.wxFinal2_[face];
+                            wy = this.spatialDisc_.lsGradQR_!.wyFinal2_[face];
+                        }
+
+                        // Sign: +1 if elem above, neighbor below (φ_neighbor + Γ)
+                        //       -1 if elem below, neighbor above (φ_neighbor - Γ)
+                        const gammaSgn = if kuttaType_elem == 1 then 1.0 else -1.0;
+
+                        dgx += wx * gammaSgn;
+                        dgy += wy * gammaSgn;
+                    }
+                }
+
+                this.dgradX_dGamma_[elem] = dgx;
+                this.dgradY_dGamma_[elem] = dgy;
+            }
+        }
+
+        // Debug: count cells with non-zero gradient sensitivity
+        if this.it_ == 1 {
+            var count = 0;
+            var maxDgx = 0.0, maxDgy = 0.0;
+            for elem in 1..this.spatialDisc_.nelemDomain_ {
+                if this.dgradX_dGamma_[elem] != 0.0 || this.dgradY_dGamma_[elem] != 0.0 {
+                    count += 1;
+                    if abs(this.dgradX_dGamma_[elem]) > maxDgx then maxDgx = abs(this.dgradX_dGamma_[elem]);
+                    if abs(this.dgradY_dGamma_[elem]) > maxDgy then maxDgy = abs(this.dgradY_dGamma_[elem]);
+                }
+            }
+            writeln("DEBUG: Cells with non-zero grad sensitivity: ", count,
+                    " max|dgradX|: ", maxDgx, " max|dgradY|: ", maxDgy);
+        }
     }
 
     proc computeJacobian() {
@@ -130,7 +245,10 @@ class temporalDiscretization {
         //   gradPhi_I = sum_k w_Ik * (phi_k - phi_I)
         //   d(gradPhi_I)/d(phi_I) = -sumW_I
         //   d(gradPhi_I)/d(phi_k) = w_Ik
-        
+
+        // First, compute gradient sensitivity to Γ for all cells
+        this.computeGradientSensitivity();
+
         this.A_petsc.zeroEntries();
         
         forall elem in 1..this.spatialDisc_.nelemDomain_ {
@@ -139,6 +257,7 @@ class temporalDiscretization {
                 this.spatialDisc_.mesh_.elem2edgeIndex_[elem + 1]];
             
             var diag = 0.0;  // Diagonal contribution d(res_elem)/d(phi_elem)
+            var dRes_dGamma = 0.0;  // Contribution d(res_elem)/d(Γ) for wake-crossing cells
             
             for face in faces {
                 const elem1 = this.spatialDisc_.mesh_.edge2elem_[1, face];
@@ -193,6 +312,13 @@ class temporalDiscretization {
                 const isInteriorFace = neighbor <= this.spatialDisc_.nelemDomain_;
                 const isWallFace = this.spatialDisc_.wallFaceSet_.contains(face);
                 
+                // Check if this face crosses the wake (Kutta condition)
+                // kuttaCell_ = 1 (above wake), -1 (below wake), 9 (elsewhere)
+                const kuttaType_elem = this.spatialDisc_.kuttaCell_[elem];
+                const kuttaType_neighbor = this.spatialDisc_.kuttaCell_[neighbor];
+                const isWakeCrossingFace = (kuttaType_elem == 1 && kuttaType_neighbor == -1) ||
+                                           (kuttaType_elem == -1 && kuttaType_neighbor == 1);
+                
                 if isInteriorFace {
                     // === INTERIOR FACE ===
                     // V_avg = 0.5*(V_elem + V_neighbor)
@@ -228,7 +354,44 @@ class temporalDiscretization {
                     offdiag += directCoeff * area;
                     
                     this.A_petsc.add(elem-1, neighbor-1, offdiag);
-                    
+
+                    // === CIRCULATION (Γ) DERIVATIVE ===
+                    // flux = 0.5 * (∇φ_elem + ∇φ_neighbor) · m + directCoeff * (φ_neighbor - φ_elem)
+                    // ∂flux/∂Γ = 0.5 * (∂∇φ_elem/∂Γ + ∂∇φ_neighbor/∂Γ) · m + ∂(direct)/∂Γ
+                    //
+                    // The gradient sensitivities are precomputed for ALL cells, capturing
+                    // contributions from ALL their wake-crossing faces (not just this face).
+                    // This ensures correct Jacobian even for faces that are not themselves
+                    // wake-crossing but whose cells have wake-crossing neighbors.
+
+                    // Contribution from elem's gradient sensitivity
+                    const dgradX_elem = this.dgradX_dGamma_[elem];
+                    const dgradY_elem = this.dgradY_dGamma_[elem];
+                    var dFlux_dGamma = 0.5 * (dgradX_elem * mx + dgradY_elem * my);
+
+                    // Contribution from neighbor's gradient sensitivity
+                    const dgradX_neighbor = this.dgradX_dGamma_[neighbor];
+                    const dgradY_neighbor = this.dgradY_dGamma_[neighbor];
+                    dFlux_dGamma += 0.5 * (dgradX_neighbor * mx + dgradY_neighbor * my);
+
+                    // Apply sign and area
+                    dFlux_dGamma *= sign * area;
+
+                    // Direct term: only for wake-crossing faces
+                    // directCoeff * ((φ_neighbor ± Γ) - φ_elem)
+                    // ∂/∂Γ = ±directCoeff (sign depends on which side of wake)
+                    if isWakeCrossingFace {
+                        var gammaSgn = 0.0;
+                        if kuttaType_elem == 1 && kuttaType_neighbor == -1 {
+                            gammaSgn = 1.0;  // elem above, neighbor below: +Γ
+                        } else {
+                            gammaSgn = -1.0; // elem below, neighbor above: -Γ
+                        }
+                        dFlux_dGamma += directCoeff * area * gammaSgn;
+                    }
+
+                    dRes_dGamma += dFlux_dGamma;
+
                 } else if isWallFace {
                     // === WALL BOUNDARY FACE ===
                     // Wall BC: phi_ghost = phi_interior (Neumann)
@@ -258,10 +421,19 @@ class temporalDiscretization {
                     
                     // Apply sign and area
                     diag += sign * face_diag * area;
-                    
+
                     // No direct phi term for wall since phi_ghost = phi_int → delta_phi = 0
                     // No off-diagonal since ghost is not a real DOF
-                    
+
+                    // === CIRCULATION (Γ) DERIVATIVE FOR WALL FACES ===
+                    // Wall flux = V_int · m_wall * A, where V_int = ∇φ_int
+                    // If the interior cell has wake-crossing faces, ∇φ_int depends on Γ
+                    // ∂flux/∂Γ = (∂∇φ_int/∂Γ · m_wall) * A
+                    const dgradX_elem = this.dgradX_dGamma_[elem];
+                    const dgradY_elem = this.dgradY_dGamma_[elem];
+                    const dFlux_dGamma_wall = (dgradX_elem * mWallX + dgradY_elem * mWallY) * sign * area;
+                    dRes_dGamma += dFlux_dGamma_wall;
+
                 } else {
                     // === FARFIELD BOUNDARY FACE ===
                     // Farfield BC: phi_ghost = U_inf*x + V_inf*y (Dirichlet, fixed)
@@ -294,6 +466,42 @@ class temporalDiscretization {
             
             // Add diagonal entry
             this.A_petsc.add(elem-1, elem-1, diag);
+            
+            // Add dRes/dΓ entry (column for circulation)
+            this.A_petsc.add(elem-1, this.gammaIndex_, dRes_dGamma);
+        }
+        
+        // === KUTTA CONDITION ROW ===
+        // Γ - (φ_upper,TE - φ_lower,TE) = 0
+        // Currently, circulation is computed as:
+        //   Γ = 0.5*(φ_upper1 + φ_upper2) + V_face·Δs - [0.5*(φ_lower1 + φ_lower2) + V_face·Δs]
+        // Simplified for linearization: Γ ≈ φ_upper1 - φ_lower1 (main cells)
+        //
+        // Kutta residual: R_Γ = Γ - (φ_upperTE - φ_lowerTE)
+        // d(R_Γ)/dΓ = 1
+        // d(R_Γ)/dφ_upperTE = -1
+        // d(R_Γ)/dφ_lowerTE = +1
+        
+        // dKutta/dΓ = 1
+        this.A_petsc.add(this.gammaIndex_, this.gammaIndex_, 1.0);
+        
+        // For more accurate linearization, use the actual circulation formula:
+        // Γ = 0.5*(φ[upperTEelem_] + φ[upperTEelem2]) - 0.5*(φ[lowerTEelem_] + φ[lowerTEelem2])
+        //   + velocity extrapolation terms (ignored for now as they're small)
+        const upperTEelem2 = this.spatialDisc_.mesh_.edge2elem_[2, this.spatialDisc_.upperTEface_];
+        const lowerTEelem2 = this.spatialDisc_.mesh_.edge2elem_[2, this.spatialDisc_.lowerTEface_];
+        
+        // dKutta/dφ_upperTE1 = -0.5
+        this.A_petsc.add(this.gammaIndex_, this.spatialDisc_.upperTEelem_ - 1, -0.5);
+        // dKutta/dφ_upperTE2 = -0.5 (if interior)
+        if upperTEelem2 <= this.spatialDisc_.nelemDomain_ {
+            this.A_petsc.add(this.gammaIndex_, upperTEelem2 - 1, -0.5);
+        }
+        // dKutta/dφ_lowerTE1 = +0.5
+        this.A_petsc.add(this.gammaIndex_, this.spatialDisc_.lowerTEelem_ - 1, 0.5);
+        // dKutta/dφ_lowerTE2 = +0.5 (if interior)
+        if lowerTEelem2 <= this.spatialDisc_.nelemDomain_ {
+            this.A_petsc.add(this.gammaIndex_, lowerTEelem2 - 1, 0.5);
         }
         
         this.A_petsc.assemblyComplete();
@@ -302,6 +510,7 @@ class temporalDiscretization {
 
     proc initialize() {
         this.spatialDisc_.initializeMetrics();
+        this.spatialDisc_.initializeKuttaCells();
         this.spatialDisc_.initializeSolution();
         this.initializeJacobian();
         this.computeJacobian();
@@ -320,6 +529,20 @@ class temporalDiscretization {
             forall elem in 1..this.spatialDisc_.nelemDomain_ {
                 this.b_petsc.set(elem-1, -this.inputs_.OMEGA_ * this.spatialDisc_.res_[elem]);
             }
+            
+            // Kutta condition residual: R_Γ = Γ - Γ_computed
+            // We want Γ to equal the computed value from the potential field
+            // R_Γ = Γ_current - (φ_upper - φ_lower) should go to zero
+            const upperTEelem2 = this.spatialDisc_.mesh_.edge2elem_[2, this.spatialDisc_.upperTEface_];
+            const lowerTEelem2 = this.spatialDisc_.mesh_.edge2elem_[2, this.spatialDisc_.lowerTEface_];
+            const phi_upper = 0.5 * (this.spatialDisc_.phi_[this.spatialDisc_.upperTEelem_] + 
+                                     this.spatialDisc_.phi_[upperTEelem2]);
+            const phi_lower = 0.5 * (this.spatialDisc_.phi_[this.spatialDisc_.lowerTEelem_] + 
+                                     this.spatialDisc_.phi_[lowerTEelem2]);
+            const gamma_computed = phi_upper - phi_lower;
+            const kutta_residual = this.spatialDisc_.circulation_ - gamma_computed;
+            this.b_petsc.set(this.gammaIndex_, -this.inputs_.OMEGA_ * kutta_residual);
+            
             this.b_petsc.assemblyComplete();
 
             const (its, reason) = GMRES(this.ksp, this.A_petsc, this.b_petsc, this.x_petsc);
@@ -327,6 +550,9 @@ class temporalDiscretization {
             forall elem in 1..this.spatialDisc_.nelemDomain_ {
                 this.spatialDisc_.phi_[elem] += this.x_petsc.get(elem-1);
             }
+            
+            // Update circulation from the Newton step
+            this.spatialDisc_.circulation_ += this.x_petsc.get(this.gammaIndex_);
 
             const res = RMSE(this.spatialDisc_.res_, this.spatialDisc_.elemVolume_);
             if this.it_ == 1 {
@@ -337,14 +563,15 @@ class temporalDiscretization {
 
             const res_wall = RMSE(this.spatialDisc_.res_[this.spatialDisc_.wall_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.wall_dom]);
             const res_fluid = RMSE(this.spatialDisc_.res_[this.spatialDisc_.fluid_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.fluid_dom]);
+            const res_wake = RMSE(this.spatialDisc_.res_[this.spatialDisc_.wake_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.wake_dom]);
 
             const (Cl, Cd, Cm) = this.spatialDisc_.computeAerodynamicCoefficients();
             time.stop();
             const elapsed = time.elapsed();
             writeln(" Time: ", elapsed, " It: ", this.it_,
                     " res: ", res, " norm res: ", normalized_res,
-                    " res wall: ", res_wall, " res fluid: ", res_fluid,
-                    " Cl: ", Cl, " Cd: ", Cd, " Cm: ", Cm, 
+                    " res wall: ", res_wall, " res fluid: ", res_fluid, " res wake: ", res_wake,
+                    " Cl: ", Cl, " Cd: ", Cd, " Cm: ", Cm, " Circulation: ", this.spatialDisc_.circulation_,
                     " GMRES its: ", its, " reason: ", reason);
 
             this.timeList_.pushBack(elapsed);

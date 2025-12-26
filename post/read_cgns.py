@@ -2,6 +2,7 @@ import h5py
 import json
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 
 def readCGNS(filename) :
     # Read CGNS file
@@ -62,16 +63,29 @@ def readCGNS(filename) :
 
         return data
 
+def readHSPM(filename) :
+    data = pd.read_csv(filename, sep=' ', skiprows=1, header=None)
+    x =  data[0].values
+    y =  data[1].values
+    z =  data[2].values
+    cp = data[3].values
 
-data = readCGNS("../output/output_53.cgns")
-data2 = readCGNS("../output/output_54.cgns")
-data3 = readCGNS("../output/cylinder_1024x1024.cgns")
+    return {'X_wall': x,
+            'Y_wall': y,
+            'Cp_wall': cp}
+
+data = readCGNS("../output/output_130.cgns")
+data2 = readCGNS("../output/output_128.cgns")
+data3 = readCGNS("../output/output_164.cgns")
+
+data_hspm = readHSPM("../output/HSPM_naca0012_A1-25.dat")
 
 
 plt.figure()
 plt.plot(data['X_wall'], data['Cp_wall'], '-', label='data')
 plt.plot(data2['X_wall'], data2['Cp_wall'], '-', label='data2')
 plt.plot(data3['X_wall'], data3['Cp_wall'], '-', label='data3')
+plt.plot(data_hspm['X_wall'], data_hspm['Cp_wall'], '-', label='HSPM')
 plt.gca().invert_yaxis()
 plt.xlabel('x')
 plt.ylabel('Cp on wall')
@@ -97,11 +111,12 @@ plt.grid()
 # y_circle = 0.5 * np.sin(theta)
 
 # plt.figure()
-# plt.quiver(data['X_wall'], data['Y_wall'], data['nx_wall'], data['ny_wall'])
+# # plt.quiver(data['X_wall'], data['Y_wall'], data['nx_wall'], data['ny_wall'])
 # plt.quiver(data['X_wall'], data['Y_wall'], data['VelocityX_wall'], data['VelocityY_wall'])
 # plt.axis('equal')
+# plt.xlim([0.95, 1.05])
 
-# plt.plot(x_circle, y_circle, 'r--')
+# # plt.plot(x_circle, y_circle, 'r--')
 
 # # compute n dot Velocity
 # ndotV = data['nx_wall'] * data['VelocityX_wall'] + data['ny_wall'] * data['VelocityY_wall']
