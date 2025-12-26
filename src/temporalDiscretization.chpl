@@ -485,24 +485,10 @@ class temporalDiscretization {
         // dKutta/dΓ = 1
         this.A_petsc.add(this.gammaIndex_, this.gammaIndex_, 1.0);
         
-        // For more accurate linearization, use the actual circulation formula:
-        // Γ = 0.5*(φ[upperTEelem_] + φ[upperTEelem2]) - 0.5*(φ[lowerTEelem_] + φ[lowerTEelem2])
-        //   + velocity extrapolation terms (ignored for now as they're small)
-        const upperTEelem2 = this.spatialDisc_.mesh_.edge2elem_[2, this.spatialDisc_.upperTEface_];
-        const lowerTEelem2 = this.spatialDisc_.mesh_.edge2elem_[2, this.spatialDisc_.lowerTEface_];
-        
-        // dKutta/dφ_upperTE1 = -0.5
-        this.A_petsc.add(this.gammaIndex_, this.spatialDisc_.upperTEelem_ - 1, -0.5);
-        // dKutta/dφ_upperTE2 = -0.5 (if interior)
-        if upperTEelem2 <= this.spatialDisc_.nelemDomain_ {
-            this.A_petsc.add(this.gammaIndex_, upperTEelem2 - 1, -0.5);
-        }
-        // dKutta/dφ_lowerTE1 = +0.5
-        this.A_petsc.add(this.gammaIndex_, this.spatialDisc_.lowerTEelem_ - 1, 0.5);
-        // dKutta/dφ_lowerTE2 = +0.5 (if interior)
-        if lowerTEelem2 <= this.spatialDisc_.nelemDomain_ {
-            this.A_petsc.add(this.gammaIndex_, lowerTEelem2 - 1, 0.5);
-        }
+        // dKutta/dφ_upperTE1 = -1.0
+        this.A_petsc.add(this.gammaIndex_, this.spatialDisc_.upperTEelem_ - 1, -1.0);
+        // dKutta/dφ_lowerTE1 = +1.0
+        this.A_petsc.add(this.gammaIndex_, this.spatialDisc_.lowerTEelem_ - 1, 1.0);
         
         this.A_petsc.assemblyComplete();
         // this.A_petsc.matView();
