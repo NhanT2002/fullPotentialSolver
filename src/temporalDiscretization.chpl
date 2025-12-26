@@ -194,20 +194,20 @@ class temporalDiscretization {
             }
         }
 
-        // Debug: count cells with non-zero gradient sensitivity
-        if this.it_ == 1 {
-            var count = 0;
-            var maxDgx = 0.0, maxDgy = 0.0;
-            for elem in 1..this.spatialDisc_.nelemDomain_ {
-                if this.dgradX_dGamma_[elem] != 0.0 || this.dgradY_dGamma_[elem] != 0.0 {
-                    count += 1;
-                    if abs(this.dgradX_dGamma_[elem]) > maxDgx then maxDgx = abs(this.dgradX_dGamma_[elem]);
-                    if abs(this.dgradY_dGamma_[elem]) > maxDgy then maxDgy = abs(this.dgradY_dGamma_[elem]);
-                }
-            }
-            writeln("DEBUG: Cells with non-zero grad sensitivity: ", count,
-                    " max|dgradX|: ", maxDgx, " max|dgradY|: ", maxDgy);
-        }
+        // // Debug: count cells with non-zero gradient sensitivity
+        // if this.it_ == 1 {
+        //     var count = 0;
+        //     var maxDgx = 0.0, maxDgy = 0.0;
+        //     for elem in 1..this.spatialDisc_.nelemDomain_ {
+        //         if this.dgradX_dGamma_[elem] != 0.0 || this.dgradY_dGamma_[elem] != 0.0 {
+        //             count += 1;
+        //             if abs(this.dgradX_dGamma_[elem]) > maxDgx then maxDgx = abs(this.dgradX_dGamma_[elem]);
+        //             if abs(this.dgradY_dGamma_[elem]) > maxDgy then maxDgy = abs(this.dgradY_dGamma_[elem]);
+        //         }
+        //     }
+        //     writeln("DEBUG: Cells with non-zero grad sensitivity: ", count,
+        //             " max|dgradX|: ", maxDgx, " max|dgradY|: ", maxDgy);
+        // }
     }
 
     proc computeJacobian() {
@@ -245,9 +245,6 @@ class temporalDiscretization {
         //   gradPhi_I = sum_k w_Ik * (phi_k - phi_I)
         //   d(gradPhi_I)/d(phi_I) = -sumW_I
         //   d(gradPhi_I)/d(phi_k) = w_Ik
-
-        // First, compute gradient sensitivity to Γ for all cells
-        this.computeGradientSensitivity();
 
         this.A_petsc.zeroEntries();
         
@@ -499,6 +496,7 @@ class temporalDiscretization {
         this.spatialDisc_.initializeKuttaCells();
         this.spatialDisc_.initializeSolution();
         this.initializeJacobian();
+        this.computeGradientSensitivity();
         this.computeJacobian();
     }
 
@@ -511,24 +509,12 @@ class temporalDiscretization {
             time.start();
 
             this.spatialDisc_.run();
+
             this.computeJacobian();
             forall elem in 1..this.spatialDisc_.nelemDomain_ {
                 this.b_petsc.set(elem-1, -this.inputs_.OMEGA_ * this.spatialDisc_.res_[elem]);
             }
-            
-            // Kutta condition residual: R_Γ = Γ - Γ_computed
-            // We want Γ to equal the computed value from the potential field
-            // R_Γ = Γ_current - (φ_upper - φ_lower) should go to zero
-            const upperTEelem2 = this.spatialDisc_.mesh_.edge2elem_[2, this.spatialDisc_.upperTEface_];
-            const lowerTEelem2 = this.spatialDisc_.mesh_.edge2elem_[2, this.spatialDisc_.lowerTEface_];
-            const phi_upper = 0.5 * (this.spatialDisc_.phi_[this.spatialDisc_.upperTEelem_] + 
-                                     this.spatialDisc_.phi_[upperTEelem2]);
-            const phi_lower = 0.5 * (this.spatialDisc_.phi_[this.spatialDisc_.lowerTEelem_] + 
-                                     this.spatialDisc_.phi_[lowerTEelem2]);
-            const gamma_computed = phi_upper - phi_lower;
-            const kutta_residual = this.spatialDisc_.circulation_ - gamma_computed;
-            this.b_petsc.set(this.gammaIndex_, -this.inputs_.OMEGA_ * kutta_residual);
-            
+            this.b_petsc.set(this.gammaIndex_, -this.inputs_.OMEGA_ * this.spatialDisc_.kutta_res_);
             this.b_petsc.assemblyComplete();
 
             const (its, reason) = GMRES(this.ksp, this.A_petsc, this.b_petsc, this.x_petsc);
