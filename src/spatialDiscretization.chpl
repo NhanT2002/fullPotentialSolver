@@ -518,6 +518,13 @@ class spatialDiscretization {
         this.lsGradQR_!.computeGradient(this.phi_, this.uu_, this.vv_, this.kuttaCell_, this.circulation_);
     }
 
+    proc computeDensityFromVelocity() {
+        forall elem in 1..this.nelemDomain_ {
+            this.rhorho_[elem] = (1.0 + this.gamma_minus_one_over_two_ * this.inputs_.MACH_ * this.inputs_.MACH_ * 
+                                 (1.0 - this.uu_[elem] * this.uu_[elem] - this.vv_[elem] * this.vv_[elem])) ** this.one_over_gamma_minus_one_;
+        }
+    }
+
     proc computeFluxes() {
         // Compute continuity fluxes using precomputed mesh coefficients.
         // 
@@ -615,6 +622,7 @@ class spatialDiscretization {
     proc run() {
         this.updateGhostCellsPhi();         // Update ghost phi values for gradient computation
         this.computeVelocityFromPhiLeastSquaresQR();
+        this.computeDensityFromVelocity();
         this.updateGhostCellsVelocity();    // Update ghost velocities for flux computation
         this.computeFluxes();
         this.computeResiduals();

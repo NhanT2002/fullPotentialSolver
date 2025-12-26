@@ -117,15 +117,6 @@ class temporalDiscretization {
         this.A_petsc.set(this.gammaIndex_, this.spatialDisc_.upperTEelem_ - 1, 0.0);
         // dKutta/dφ_lowerTE = +1
         this.A_petsc.set(this.gammaIndex_, this.spatialDisc_.lowerTEelem_ - 1, 0.0);
-        // Also need ghost cells for TE faces
-        const upperTEelem2 = this.spatialDisc_.mesh_.edge2elem_[2, this.spatialDisc_.upperTEface_];
-        const lowerTEelem2 = this.spatialDisc_.mesh_.edge2elem_[2, this.spatialDisc_.lowerTEface_];
-        if upperTEelem2 <= this.spatialDisc_.nelemDomain_ {
-            this.A_petsc.set(this.gammaIndex_, upperTEelem2 - 1, 0.0);
-        }
-        if lowerTEelem2 <= this.spatialDisc_.nelemDomain_ {
-            this.A_petsc.set(this.gammaIndex_, lowerTEelem2 - 1, 0.0);
-        }
 
         this.A_petsc.assemblyComplete();
         // this.A_petsc.matView();
