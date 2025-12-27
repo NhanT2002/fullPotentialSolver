@@ -36,6 +36,8 @@ class spatialDiscretization {
     var elemCentroidY_: [elem_dom] real(64);
     var elemVolume_: [elem_dom] real(64);
     var kuttaCell_: [elem_dom] int; // 1 if over wake, -1 if under wake, 9 otherwise
+    var gradRhoX_: [elem_dom] real(64);
+    var gradRhoY_: [elem_dom] real(64);
 
     
     var TEnode_: int;
@@ -73,6 +75,7 @@ class spatialDiscretization {
     var flux_: [face_dom] real(64);       // Flux storage for residual computation
 
     var gamma_minus_one_over_two_: real(64);
+    var one_minus_gamma_over_two_: real(64);
     var one_over_gamma_minus_one_: real(64);
 
     // Least-squares gradient operator (precomputed coefficients)
@@ -100,6 +103,7 @@ class spatialDiscretization {
         this.face_dom = {1..this.nface_};
 
         this.gamma_minus_one_over_two_ = (this.inputs_.GAMMA_ - 1.0) / 2.0;
+        this.one_minus_gamma_over_two_ = (1.0 - this.inputs_.GAMMA_) / 2.0;
         this.one_over_gamma_minus_one_ = 1.0 / (this.inputs_.GAMMA_ - 1.0);
     }
 
@@ -269,7 +273,7 @@ class spatialDiscretization {
         // this.lsGrad_!.precompute(this.elemCentroidX_, this.elemCentroidY_);
 
         // Initialize and precompute QR-based least-squares gradient (Blazek formulation)
-        this.lsGradQR_ = new owned LeastSquaresGradientQR(this.mesh_, this.elemCentroidX_, this.elemCentroidY_);
+        this.lsGradQR_ = new owned LeastSquaresGradientQR(this.mesh_);
         this.lsGradQR_!.precompute(this.elemCentroidX_, this.elemCentroidY_);
     }
 
@@ -440,19 +444,6 @@ class spatialDiscretization {
         forall face in this.mesh_.edgeFarfield_ do updateFarfieldGhostVelocity(face);
     }
 
-    proc computeCirculation() {
-        const upperTEelem2 = this.mesh_.edge2elem_[2, this.upperTEface_];
-        const lowerTEelem2 = this.mesh_.edge2elem_[2, this.lowerTEface_];
-
-        const phiUpperTEface = 0.5*(this.phi_[this.upperTEelem_] + this.phi_[upperTEelem2]);
-        const phiLowerTEface = 0.5*(this.phi_[this.lowerTEelem_] + this.phi_[lowerTEelem2]);
-
-        const phiUpperTE = phiUpperTEface + (this.uFace_[this.upperTEface_]*this.deltaSupperTEx_ + this.vFace_[this.upperTEface_]*this.deltaSupperTEy_);
-        const phiLowerTE = phiLowerTEface + (this.uFace_[this.lowerTEface_]*this.deltaSlowerTEx_ + this.vFace_[this.lowerTEface_]*this.deltaSlowerTEy_);
-
-        this.circulation_ = phiUpperTE - phiLowerTE;
-    }
-
     proc computeGradientGreenGauss(ref phi: [] real(64), 
                                     ref gradX: [] real(64), 
                                     ref gradY: [] real(64)) {
@@ -523,10 +514,21 @@ class spatialDiscretization {
             this.rhorho_[elem] = (1.0 + this.gamma_minus_one_over_two_ * this.inputs_.MACH_ * this.inputs_.MACH_ * 
                                  (1.0 - this.uu_[elem] * this.uu_[elem] - this.vv_[elem] * this.vv_[elem])) ** this.one_over_gamma_minus_one_;
         }
+
+        forall face in this.mesh_.edgeWall_ {
+            const elem1 = this.mesh_.edge2elem_[1, face];
+            const elem2 = this.mesh_.edge2elem_[2, face];
+            // Determine which element is interior
+            const (interiorElem, ghostElem) = 
+                if elem1 <= this.nelemDomain_ then (elem1, elem2) else (elem2, elem1);
+
+            // Copy interior density to ghost cell
+            this.rhorho_[ghostElem] = this.rhorho_[interiorElem];
+        }
     }
 
-    proc computeFluxes() {
-        // Compute continuity fluxes using precomputed mesh coefficients.
+    proc computeFaceProperties() {
+        // Compute face properties using precomputed mesh coefficients.
         // 
         // Face velocity with deferred correction:
         //   V_face = V_avg - (V_avg · t_IJ - dφ/dl) * corrCoeff
@@ -576,19 +578,79 @@ class spatialDiscretization {
             const vFace = vAvg - delta * this.corrCoeffY_[face];
             
             // Isentropic density from Bernoulli equation
-            const rhoFace = (1.0 + this.gamma_minus_one_over_two_ * this.inputs_.MACH_ * this.inputs_.MACH_ * 
+            var rhoFace = (1.0 + this.gamma_minus_one_over_two_ * this.inputs_.MACH_ * this.inputs_.MACH_ * 
                              (1.0 - uFace * uFace - vFace * vFace)) ** this.one_over_gamma_minus_one_;
+
+            // // Padé approximation for density at high Mach numbers
+            // const q = sqrt(uFace * uFace + vFace * vFace);
+            // if q >= this.inputs_.q_crit_ {
+            //     const beta = this.inputs_.beta_crit_;
+            //     const rhoCrit = this.inputs_.rho_crit_;
+            //     rhoFace = rhoCrit / (1.0 + beta * (q / this.inputs_.q_crit_ - 1.0) );
+            // }
 
             // Store face quantities
             this.uFace_[face] = uFace;
             this.vFace_[face] = vFace;
             this.rhoFace_[face] = rhoFace;
+        }
+    }
 
-            // Continuity flux: ρ * (V · n) * A
+    proc artificialDensity() {
+        // Compute density gradient using least-squares QR
+        this.lsGradQR_!.computeGradient(this.rhorho_, this.gradRhoX_, this.gradRhoY_);
+
+        forall face in this.mesh_.edgeWall_ {
+            const elem1 = this.mesh_.edge2elem_[1, face];
+            const elem2 = this.mesh_.edge2elem_[2, face];
+            // Determine which element is interior
+            const (interiorElem, ghostElem) = 
+                if elem1 <= this.nelemDomain_ then (elem1, elem2) else (elem2, elem1);
+
+            // Copy interior density gradient to ghost cell
+            this.gradRhoX_[ghostElem] = this.gradRhoX_[interiorElem];
+            this.gradRhoY_[ghostElem] = this.gradRhoY_[interiorElem];
+        }
+
+        forall face in 1..this.nface_ {
+            const elem1 = this.mesh_.edge2elem_[1, face];
+            const elem2 = this.mesh_.edge2elem_[2, face];
+
+            // find upwing cell based on normal velocity
             const nx = this.faceNormalX_[face];
             const ny = this.faceNormalY_[face];
-            // this.flux_[face] = rhoFace * (uFace * nx + vFace * ny) * this.faceArea_[face];
-            this.flux_[face] = (uFace * nx + vFace * ny) * this.faceArea_[face];
+            const uFace = this.uFace_[face];
+            const vFace = this.vFace_[face];
+            const vDotN = uFace * nx + vFace * ny;
+            var upwindElem: int;
+            if vDotN >= 0.0 {
+                upwindElem = elem1;
+            } else {
+                upwindElem = elem2;
+            }
+
+            // compute mach number at upwind cell
+            const machUpwind = this.mach(this.uu_[upwindElem], this.vv_[upwindElem], this.rhorho_[upwindElem]);
+            // compute switching function
+            const mu = this.inputs_.MU_C_ * max(0, machUpwind*machUpwind - this.inputs_.MACH_C_*this.inputs_.MACH_C_);
+            
+            const dx = 2*abs(this.faceCentroidX_[face] - this.elemCentroidX_[upwindElem]);
+            const dy = 2*abs(this.faceCentroidY_[face] - this.elemCentroidY_[upwindElem]);
+            const d = sqrt(dx*dx + dy*dy);
+
+            const vel_mag = sqrt(uFace*uFace + vFace*vFace);
+
+            const deltaRho = mu * d / vel_mag * (this.gradRhoX_[upwindElem]*uFace + this.gradRhoY_[upwindElem]*vFace);
+
+            this.rhoFace_[face] -= deltaRho;
+        }
+    }
+
+    proc computeFluxes() {
+        // Continuity flux: ρ * (V · n) * A
+        forall face in 1..this.nface_ {
+            this.flux_[face] = this.rhoFace_[face] * (this.uFace_[face] * this.faceNormalX_[face] 
+                            + this.vFace_[face] * this.faceNormalY_[face]) * this.faceArea_[face];
         }
     }
 
@@ -624,6 +686,8 @@ class spatialDiscretization {
         this.computeVelocityFromPhiLeastSquaresQR();
         this.computeDensityFromVelocity();
         this.updateGhostCellsVelocity();    // Update ghost velocities for flux computation
+        this.computeFaceProperties();
+        this.artificialDensity();
         this.computeFluxes();
         this.computeResiduals();
     }
@@ -650,7 +714,7 @@ class spatialDiscretization {
     }
 
     proc mach(u: real(64), v: real(64), rho: real(64)): real(64) {
-        return this.inputs_.MACH_ * sqrt(u**2 + v**2) * rho**((1-this.inputs_.GAMMA_)/2);
+        return this.inputs_.MACH_ * sqrt(u**2 + v**2) * rho**this.one_minus_gamma_over_two_;
     }
 
     proc writeSolution(timeList: list(real(64)), 

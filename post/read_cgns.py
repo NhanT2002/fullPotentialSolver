@@ -74,9 +74,9 @@ def readHSPM(filename) :
             'Y_wall': y,
             'Cp_wall': cp}
 
-data = readCGNS("../output/output_185.cgns")
-data2 = readCGNS("../output/output_186.cgns")
-data3 = readCGNS("../output/output_187.cgns")
+data = readCGNS("../output/output_230.cgns")
+data2 = readCGNS("../output/output_231.cgns")
+data3 = readCGNS("../output/output_237.cgns")
 
 data_hspm = readHSPM("../output/HSPM_naca0012_A1-25.dat")
 
@@ -85,7 +85,7 @@ plt.figure()
 plt.plot(data['X_wall'], data['Cp_wall'], '-', label='data')
 plt.plot(data2['X_wall'], data2['Cp_wall'], '-', label='data2')
 plt.plot(data3['X_wall'], data3['Cp_wall'], '-', label='data3')
-plt.plot(data_hspm['X_wall'], data_hspm['Cp_wall'], '-', label='HSPM')
+# plt.plot(data_hspm['X_wall'], data_hspm['Cp_wall'], '-', label='HSPM')
 plt.gca().invert_yaxis()
 plt.xlabel('x')
 plt.ylabel('Cp on wall')

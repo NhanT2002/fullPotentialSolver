@@ -39,6 +39,7 @@ class temporalDiscretization {
     var gradSensitivity_dom: domain(1) = {1..0};
     var dgradX_dGamma_: [gradSensitivity_dom] real(64);
     var dgradY_dGamma_: [gradSensitivity_dom] real(64);
+    var Jij_: [gradSensitivity_dom] real(64);
 
     proc init(spatialDisc: shared spatialDiscretization, ref inputs: potentialInputs) {
         writeln("Initializing temporal discretization...");
@@ -259,6 +260,7 @@ class temporalDiscretization {
                 const nx = this.spatialDisc_.faceNormalX_[face];
                 const ny = this.spatialDisc_.faceNormalY_[face];
                 const area = this.spatialDisc_.faceArea_[face];
+                const rhoFace = this.spatialDisc_.rhoFace_[face];
                 
                 // Get precomputed correction coefficients
                 const t_x = this.spatialDisc_.t_IJ_x_[face];
@@ -320,10 +322,10 @@ class temporalDiscretization {
                     face_diag += 0.5 * (wx_neighborToElem * mx + wy_neighborToElem * my);
                     
                     // Apply sign and area to gradient terms
-                    diag += sign * face_diag * area;
+                    diag += sign * face_diag * area * rhoFace;
                     
                     // Direct phi term: d((phi_2 - phi_1) * directCoeff)/d(phi_elem)
-                    diag -= directCoeff * area;
+                    diag -= directCoeff * area * rhoFace;
                     
                     // === OFF-DIAGONAL CONTRIBUTION ===
                     const sumWx_neighbor = this.spatialDisc_.lsGradQR_!.sumWx_[neighbor];
@@ -336,10 +338,10 @@ class temporalDiscretization {
                     offdiag += 0.5 * (-sumWx_neighbor * mx - sumWy_neighbor * my);
                     
                     // Apply sign and area to gradient terms
-                    offdiag *= sign * area;
+                    offdiag *= sign * area * rhoFace;
                     
                     // Direct phi term
-                    offdiag += directCoeff * area;
+                    offdiag += directCoeff * area * rhoFace;
                     
                     this.A_petsc.add(elem-1, neighbor-1, offdiag);
 
@@ -363,7 +365,7 @@ class temporalDiscretization {
                     dFlux_dGamma += 0.5 * (dgradX_neighbor * mx + dgradY_neighbor * my);
 
                     // Apply sign and area
-                    dFlux_dGamma *= sign * area;
+                    dFlux_dGamma *= sign * area * rhoFace;
 
                     // Direct term: only for wake-crossing faces
                     // directCoeff * ((φ_neighbor ± Γ) - φ_elem)
@@ -375,7 +377,7 @@ class temporalDiscretization {
                         } else {
                             gammaSgn = -1.0; // elem below, neighbor above: -Γ
                         }
-                        dFlux_dGamma += directCoeff * area * gammaSgn;
+                        dFlux_dGamma += directCoeff * area * rhoFace * gammaSgn;
                     }
 
                     dRes_dGamma += dFlux_dGamma;
@@ -408,7 +410,7 @@ class temporalDiscretization {
                                   + (-sumWy_elem + wy_elemToNeighbor) * mWallY;
                     
                     // Apply sign and area
-                    diag += sign * face_diag * area;
+                    diag += sign * face_diag * area * rhoFace;
 
                     // No direct phi term for wall since phi_ghost = phi_int → delta_phi = 0
                     // No off-diagonal since ghost is not a real DOF
@@ -419,7 +421,7 @@ class temporalDiscretization {
                     // ∂flux/∂Γ = (∂∇φ_int/∂Γ · m_wall) * A
                     const dgradX_elem = this.dgradX_dGamma_[elem];
                     const dgradY_elem = this.dgradY_dGamma_[elem];
-                    const dFlux_dGamma_wall = (dgradX_elem * mWallX + dgradY_elem * mWallY) * sign * area;
+                    const dFlux_dGamma_wall = (dgradX_elem * mWallX + dgradY_elem * mWallY) * sign * area * rhoFace;
                     dRes_dGamma += dFlux_dGamma_wall;
 
                 } else {
@@ -448,15 +450,60 @@ class temporalDiscretization {
                     // d/d(phi_int) = -k*invL = -directCoeff
                     
                     // Apply sign and area for direct term only
-                    diag -= directCoeff * area;
+                    diag -= directCoeff * area * rhoFace;
                 }
             }
             
             // Add diagonal entry
             this.A_petsc.add(elem-1, elem-1, diag);
+            // Store diag for possible use in upwinding
+            this.Jij_[elem] = diag;
             
             // Add dRes/dΓ entry (column for circulation)
             this.A_petsc.add(elem-1, this.gammaIndex_, dRes_dGamma);
+        }
+
+        for face in 1..this.spatialDisc_.nface_ {
+            const uFace = this.spatialDisc_.uFace_[face];
+            const vFace = this.spatialDisc_.vFace_[face];
+            const rhoFace = this.spatialDisc_.rhoFace_[face];
+            const machFace = this.spatialDisc_.mach(uFace, vFace, rhoFace);
+            if machFace >= this.inputs_.MACH_C_ {
+                const elem1 = this.spatialDisc_.mesh_.edge2elem_[1, face];
+                const elem2 = this.spatialDisc_.mesh_.edge2elem_[2, face];
+                if elem1 <= this.spatialDisc_.nelemDomain_ && elem2 <= this.spatialDisc_.nelemDomain_ {
+                    // determine upwind and downwind elements
+                    const nx = this.spatialDisc_.faceNormalX_[face];
+                    const ny = this.spatialDisc_.faceNormalY_[face];
+                    const velDotN = uFace * nx + vFace * ny;
+                    var upwindElem: int;
+                    var downwindElem: int;
+                    if velDotN >= 0.0 {
+                        upwindElem = elem1;
+                        downwindElem = elem2;
+                    } else {
+                        upwindElem = elem2;
+                        downwindElem = elem1;
+                    }
+                    // Increase absolute value of diagonal term for downwind element
+                    const deltaS = sqrt((this.spatialDisc_.elemCentroidX_[downwindElem] - this.spatialDisc_.elemCentroidX_[upwindElem])**2 +
+                                        (this.spatialDisc_.elemCentroidY_[downwindElem] - this.spatialDisc_.elemCentroidY_[upwindElem])**2);
+                    const increase = this.inputs_.BETA_*sqrt(uFace*uFace + vFace*vFace) / deltaS;
+                    // Extract main diagonal term for downwind element
+                    const diagTerm = this.Jij_[downwindElem];
+                    if diagTerm >= 0.0 {
+                        // Increase diagonal and decrease off-diagonal
+                        this.A_petsc.add(downwindElem-1, downwindElem-1, increase);
+                        this.A_petsc.add(downwindElem-1, upwindElem-1, -increase);
+                    }
+                    else {
+                        // Decrease diagonal and increase off-diagonal
+                        this.A_petsc.add(downwindElem-1, downwindElem-1, -increase);
+                        this.A_petsc.add(downwindElem-1, upwindElem-1, increase);
+                    }
+                }
+            }
+            
         }
         
         // === KUTTA CONDITION ROW ===

@@ -101,6 +101,8 @@ record potentialInputs {
     var CFL_UNSTEADY_: real(64) = CFL_UNSTEADY;
 
     var q_crit_: real(64) = q_crit;
+    var beta_crit_ = MACH_**2*q_crit / (1 + (GAMMA_ - 1)/2*MACH_**2*(1 - q_crit**2));
+    var rho_crit_ = (1.0 + (GAMMA_ - 1)/2 * MACH_ * MACH_ * (1.0 - q_crit * q_crit)) ** (1.0 / (GAMMA_ - 1.0));
 
     proc init() {
         writeln("GRID_FILENAME = ", GRID_FILENAME);

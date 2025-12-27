@@ -249,9 +249,7 @@ class LeastSquaresGradientQR {
     /*
      * Initialize the QR-based least-squares gradient operator
      */
-    proc init(Mesh: shared MeshData, 
-              ref elemCentroidX: [] real(64), 
-              ref elemCentroidY: [] real(64)) {
+    proc init(Mesh: shared MeshData) {
         this.mesh_ = Mesh;
         this.nelemDomain_ = Mesh.nelem_;
         this.elem_dom = {1..this.nelemDomain_};
@@ -266,8 +264,8 @@ class LeastSquaresGradientQR {
      * 
      * This precomputes everything so that at runtime, gradient = sum(w * dphi)
      */
-    proc precompute(ref elemCentroidX: [] real(64), 
-                    ref elemCentroidY: [] real(64)) {
+    proc precompute(const ref elemCentroidX: [] real(64), 
+                    const ref elemCentroidY: [] real(64)) {
         
         // Temporary storage for per-face theta and per-cell R matrix
         var theta: [this.face_dom] real(64);
@@ -410,11 +408,11 @@ class LeastSquaresGradientQR {
     /*
      * Compute gradient of a scalar field using fully precomputed weights
      */
-    proc computeGradient(ref phi: [] real(64), 
+    proc computeGradient(const ref phi: [] real(64), 
                          ref gradX: [] real(64), 
                          ref gradY: [] real(64),
-                         ref kuttaCell_: [] int,
-                         ref circulation_: real(64)) {
+                         const ref kuttaCell_: [] int,
+                         const circulation_: real(64)) {
         
         forall elem in 1..this.nelemDomain_ {
             const faces = this.mesh_.elem2edge_[this.mesh_.elem2edgeIndex_[elem] + 1 .. 
@@ -445,6 +443,41 @@ class LeastSquaresGradientQR {
                 }
 
                 const dphi = phiJ - phiI;
+                
+                // Use precomputed weights for correct perspective
+                if elem == elem1 {
+                    gx += this.wxFinal1_[face] * dphi;
+                    gy += this.wyFinal1_[face] * dphi;
+                } else {
+                    gx += this.wxFinal2_[face] * dphi;
+                    gy += this.wyFinal2_[face] * dphi;
+                }
+            }
+            
+            gradX[elem] = gx;
+            gradY[elem] = gy;
+        }
+    }
+    /*
+     * Compute gradient of a scalar field using fully precomputed weights
+     */
+    proc computeGradient(const ref phi: [] real(64), 
+                         ref gradX: [] real(64), 
+                         ref gradY: [] real(64)) {
+        
+        forall elem in 1..this.nelemDomain_ {
+            const faces = this.mesh_.elem2edge_[this.mesh_.elem2edgeIndex_[elem] + 1 .. 
+                                                 this.mesh_.elem2edgeIndex_[elem + 1]];
+            
+            const phiI = phi[elem];
+            var gx = 0.0, gy = 0.0;
+            
+            for face in faces {
+                const elem1 = this.mesh_.edge2elem_[1, face];
+                const elem2 = this.mesh_.edge2elem_[2, face];
+                const neighbor = if elem1 == elem then elem2 else elem1;
+
+                const dphi = phi[neighbor] - phiI;
                 
                 // Use precomputed weights for correct perspective
                 if elem == elem1 {
