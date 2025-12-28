@@ -28,6 +28,8 @@ config const MU_C : real(64);
 config const MACH_C : real(64);
 config const BETA : real(64); // Level of upwinding in Jacobian matrix
 
+config const LINE_SEARCH : bool;
+
 config const GMRES_RTOL : real(64);
 config const GMRES_ATOL : real(64);
 config const GMRES_DTOL : real(64);
@@ -83,6 +85,8 @@ record potentialInputs {
     var MU_C_: real(64) = MU_C;
     var MACH_C_: real(64) = MACH_C;
     var BETA_: real(64) = BETA;
+
+    var LINE_SEARCH_: bool = LINE_SEARCH;
 
     var GMRES_RTOL_: real(64) = GMRES_RTOL;
     var GMRES_ATOL_: real(64) = GMRES_ATOL;

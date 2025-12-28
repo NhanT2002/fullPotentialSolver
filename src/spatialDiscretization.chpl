@@ -36,8 +36,8 @@ class spatialDiscretization {
     var elemCentroidY_: [elem_dom] real(64);
     var elemVolume_: [elem_dom] real(64);
     var kuttaCell_: [elem_dom] int; // 1 if over wake, -1 if under wake, 9 otherwise
-    var gradRhoX_: [elem_dom] real(64);
-    var gradRhoY_: [elem_dom] real(64);
+    var machmach_: [elem_dom] real(64);
+    var mumu_: [elem_dom] real(64);
 
     
     var TEnode_: int;
@@ -62,6 +62,8 @@ class spatialDiscretization {
     var vFace_: [face_dom] real(64);
     var rhoFace_: [face_dom] real(64);
     var pFace_: [face_dom] real(64);
+    var machFace_: [face_dom] real(64);
+    var velMagFace_: [face_dom] real(64);
 
     // Precomputed coefficients for flux computation (mesh-dependent only)
     var invL_IJ_: [face_dom] real(64);      // 1 / distance between cell centroids
@@ -73,6 +75,8 @@ class spatialDiscretization {
     var faceFluxX_: [face_dom] real(64);   // Flux storage for Green-Gauss
     var faceFluxY_: [face_dom] real(64);
     var flux_: [face_dom] real(64);       // Flux storage for residual computation
+    var upwindElem_: [face_dom] int;       // Upwind element for each face (for Jacobian)
+    var downwindElem_: [face_dom] int;     // Downwind element for each face (for Jacobian)
 
     var gamma_minus_one_over_two_: real(64);
     var one_minus_gamma_over_two_: real(64);
@@ -513,6 +517,8 @@ class spatialDiscretization {
         forall elem in 1..this.nelemDomain_ {
             this.rhorho_[elem] = (1.0 + this.gamma_minus_one_over_two_ * this.inputs_.MACH_ * this.inputs_.MACH_ * 
                                  (1.0 - this.uu_[elem] * this.uu_[elem] - this.vv_[elem] * this.vv_[elem])) ** this.one_over_gamma_minus_one_;
+            this.machmach_[elem] = this.mach(this.uu_[elem], this.vv_[elem], this.rhorho_[elem]);
+            this.mumu_[elem] = this.inputs_.MU_C_ * max(0.0, this.machmach_[elem]*this.machmach_[elem] - this.inputs_.MACH_C_*this.inputs_.MACH_C_);
         }
 
         forall face in this.mesh_.edgeWall_ {
@@ -524,6 +530,8 @@ class spatialDiscretization {
 
             // Copy interior density to ghost cell
             this.rhorho_[ghostElem] = this.rhorho_[interiorElem];
+            this.machmach_[ghostElem] = this.machmach_[interiorElem];
+            this.mumu_[ghostElem] = this.mumu_[interiorElem];
         }
     }
 
@@ -622,19 +630,19 @@ class spatialDiscretization {
             const vFace = this.vFace_[face];
             const vDotN = uFace * nx + vFace * ny;
             
-            // Upwind element based on flow direction
-            var upwindElem: int;
+            // Upwind/downwind elements based on flow direction (store for Jacobian reuse)
             if vDotN >= 0.0 {
-                upwindElem = elem1;
+                this.upwindElem_[face] = elem1;
+                this.downwindElem_[face] = elem2;
             } else {
-                upwindElem = elem2;
+                this.upwindElem_[face] = elem2;
+                this.downwindElem_[face] = elem1;
             }
-
-            // Compute local Mach number at upwind cell
-            const machUpwind = this.mach(this.uu_[upwindElem], this.vv_[upwindElem], this.rhorho_[upwindElem]);
+            const upwindElem = this.upwindElem_[face];
+            const downwindElem = this.downwindElem_[face];
             
-            // Switching function: activates when local Mach > MACH_C
-            const mu = this.inputs_.MU_C_ * max(0.0, machUpwind*machUpwind - this.inputs_.MACH_C_*this.inputs_.MACH_C_);
+            // Cell-centered switching function from upwind cell
+            const mu = this.mumu_[upwindElem];
             
             // Skip if switching function is zero (subsonic region)
             if mu <= 0.0 then continue;
@@ -653,6 +661,10 @@ class spatialDiscretization {
         forall face in 1..this.nface_ {
             this.flux_[face] = this.rhoFace_[face] * (this.uFace_[face] * this.faceNormalX_[face] 
                             + this.vFace_[face] * this.faceNormalY_[face]) * this.faceArea_[face];
+
+            // Also precompute mach face and velMagFace for jacobian reuse
+            this.machFace_[face] = this.mach(this.uFace_[face], this.vFace_[face], this.rhoFace_[face]);
+            this.velMagFace_[face] = sqrt(this.uFace_[face]**2 + this.vFace_[face]**2);
         }
     }
 

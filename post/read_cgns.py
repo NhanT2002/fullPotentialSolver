@@ -74,9 +74,9 @@ def readHSPM(filename) :
             'Y_wall': y,
             'Cp_wall': cp}
 
-data = readCGNS("../output/output_397.cgns")
-data2 = readCGNS("../output/output_410.cgns")
-data3 = readCGNS("../output/output_413.cgns")
+data = readCGNS("../output/output_465.cgns")
+data2 = readCGNS("../output/output_466.cgns")
+data3 = readCGNS("../output/output_469.cgns")
 
 data_hspm = readHSPM("../output/HSPM_naca0012_A1-25.dat")
 
@@ -98,6 +98,16 @@ plt.semilogy(data['it'], data['res'], label='data')
 plt.semilogy(data2['it'], data2['res'], label='data2')
 plt.semilogy(data3['it'], data3['res'], label='data3')
 plt.xlabel('Iteration')
+plt.ylabel('Normalized Residual')
+plt.title('Convergence History')
+plt.legend()
+plt.grid()
+
+plt.figure()
+plt.semilogy(data['time'], data['res'], label='data')
+plt.semilogy(data2['time'], data2['res'], label='data2')
+plt.semilogy(data3['time'], data3['res'], label='data3')
+plt.xlabel('Time')
 plt.ylabel('Normalized Residual')
 plt.title('Convergence History')
 plt.legend()
