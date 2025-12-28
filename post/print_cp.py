@@ -63,28 +63,12 @@ def readCGNS(filename) :
 
         return data
 
-def readHSPM(filename) :
-    data = pd.read_csv(filename, sep=' ', skiprows=1, header=None)
-    x =  data[0].values
-    y =  data[1].values
-    z =  data[2].values
-    cp = data[3].values
 
-    return {'X_wall': x,
-            'Y_wall': y,
-            'Cp_wall': cp}
-
-data = readCGNS("../output/output_397.cgns")
-data2 = readCGNS("../output/output_410.cgns")
-data3 = readCGNS("../output/output_413.cgns")
-
-data_hspm = readHSPM("../output/HSPM_naca0012_A1-25.dat")
+data = readCGNS("../output/output_384.cgns")
 
 
 plt.figure()
 plt.plot(data['X_wall'], data['Cp_wall'], '-', label='data')
-plt.plot(data2['X_wall'], data2['Cp_wall'], '-', label='data2')
-plt.plot(data3['X_wall'], data3['Cp_wall'], '-', label='data3')
 # plt.plot(data_hspm['X_wall'], data_hspm['Cp_wall'], '-', label='HSPM')
 plt.gca().invert_yaxis()
 plt.xlabel('x')
@@ -95,30 +79,13 @@ plt.grid()
 
 plt.figure()
 plt.semilogy(data['it'], data['res'], label='data')
-plt.semilogy(data2['it'], data2['res'], label='data2')
-plt.semilogy(data3['it'], data3['res'], label='data3')
 plt.xlabel('Iteration')
 plt.ylabel('Normalized Residual')
 plt.title('Convergence History')
 plt.legend()
 plt.grid()
 
-
-
-# # plot circle of radius 0.5
-# theta = np.linspace(0, 2 * np.pi, 100)
-# x_circle = 0.5 * np.cos(theta)
-# y_circle = 0.5 * np.sin(theta)
-
-# plt.figure()
-# # plt.quiver(data['X_wall'], data['Y_wall'], data['nx_wall'], data['ny_wall'])
-# plt.quiver(data['X_wall'], data['Y_wall'], data['VelocityX_wall'], data['VelocityY_wall'])
-# plt.axis('equal')
-# plt.xlim([0.95, 1.05])
-
-# # plt.plot(x_circle, y_circle, 'r--')
-
-# # compute n dot Velocity
-# ndotV = data['nx_wall'] * data['VelocityX_wall'] + data['ny_wall'] * data['VelocityY_wall']
-# max_ndotV = np.max(np.abs(ndotV))
-# print("Max |n dot V| on wall: ", max_ndotV)
+# print Cp
+print("Cp distribution on wall:")
+for x, cp in zip(data['X_wall'], data['Cp_wall']):
+    print(f"x: {x:.4f}, Cp: {cp:.4f}")

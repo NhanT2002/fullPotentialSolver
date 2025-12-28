@@ -597,31 +597,32 @@ class spatialDiscretization {
     }
 
     proc artificialDensity() {
-        // Compute density gradient using least-squares QR
-        this.lsGradQR_!.computeGradient(this.rhorho_, this.gradRhoX_, this.gradRhoY_);
-
-        forall face in this.mesh_.edgeWall_ {
-            const elem1 = this.mesh_.edge2elem_[1, face];
-            const elem2 = this.mesh_.edge2elem_[2, face];
-            // Determine which element is interior
-            const (interiorElem, ghostElem) = 
-                if elem1 <= this.nelemDomain_ then (elem1, elem2) else (elem2, elem1);
-
-            // Copy interior density gradient to ghost cell
-            this.gradRhoX_[ghostElem] = this.gradRhoX_[interiorElem];
-            this.gradRhoY_[ghostElem] = this.gradRhoY_[interiorElem];
-        }
-
+        // Jameson-type density upwinding for transonic stability.
+        // 
+        // The artificial compressibility formulation blends between isentropic
+        // density (accurate for subsonic flow) and upwind density (stable for
+        // transonic/supersonic flow):
+        //
+        //   ρ_face = (1 - ν) * ρ_isentropic + ν * ρ_upwind
+        //
+        // where ν is a switching function that activates in supersonic regions:
+        //   ν = μ_c * max(0, M² - M_c²)
+        //
+        // This is equivalent to modifying the isentropic density:
+        //   ρ_face = ρ_isentropic - ν * (ρ_isentropic - ρ_upwind)
+        
         forall face in 1..this.nface_ {
             const elem1 = this.mesh_.edge2elem_[1, face];
             const elem2 = this.mesh_.edge2elem_[2, face];
 
-            // find upwing cell based on normal velocity
+            // Get face velocity and determine upwind direction
             const nx = this.faceNormalX_[face];
             const ny = this.faceNormalY_[face];
             const uFace = this.uFace_[face];
             const vFace = this.vFace_[face];
             const vDotN = uFace * nx + vFace * ny;
+            
+            // Upwind element based on flow direction
             var upwindElem: int;
             if vDotN >= 0.0 {
                 upwindElem = elem1;
@@ -629,20 +630,21 @@ class spatialDiscretization {
                 upwindElem = elem2;
             }
 
-            // compute mach number at upwind cell
+            // Compute local Mach number at upwind cell
             const machUpwind = this.mach(this.uu_[upwindElem], this.vv_[upwindElem], this.rhorho_[upwindElem]);
-            // compute switching function
-            const mu = this.inputs_.MU_C_ * max(0, machUpwind*machUpwind - this.inputs_.MACH_C_*this.inputs_.MACH_C_);
             
-            const dx = 2*abs(this.faceCentroidX_[face] - this.elemCentroidX_[upwindElem]);
-            const dy = 2*abs(this.faceCentroidY_[face] - this.elemCentroidY_[upwindElem]);
-            const d = sqrt(dx*dx + dy*dy);
-
-            const vel_mag = sqrt(uFace*uFace + vFace*vFace);
-
-            const deltaRho = mu * d / vel_mag * (this.gradRhoX_[upwindElem]*uFace + this.gradRhoY_[upwindElem]*vFace);
-
-            this.rhoFace_[face] -= deltaRho;
+            // Switching function: activates when local Mach > MACH_C
+            const mu = this.inputs_.MU_C_ * max(0.0, machUpwind*machUpwind - this.inputs_.MACH_C_*this.inputs_.MACH_C_);
+            
+            // Skip if switching function is zero (subsonic region)
+            if mu <= 0.0 then continue;
+            
+            // Get isentropic and upwind densities
+            const rhoIsentropic = this.rhoFace_[face];
+            const rhoUpwind = this.rhorho_[upwindElem];
+            
+            // Blend: ρ_face = ρ_isen - μ * (ρ_isen - ρ_upwind)
+            this.rhoFace_[face] = rhoIsentropic - mu * (rhoIsentropic - rhoUpwind);
         }
     }
 

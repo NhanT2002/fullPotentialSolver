@@ -327,6 +327,72 @@ class temporalDiscretization {
                     // Direct phi term: d((phi_2 - phi_1) * directCoeff)/d(phi_elem)
                     diag -= directCoeff * area * rhoFace;
                     
+                    // === DENSITY RETARDATION FOR TRANSONIC FLOWS ===
+                    // In supersonic regions, ρ_face depends on upwind density:
+                    //   ρ_face = (1-μ) * ρ_isen + μ * ρ_upwind
+                    // The flux F = ρ_face * (V·n) * A includes ∂ρ_face/∂φ terms.
+                    //
+                    // ∂F/∂φ = ρ_face * ∂(V·n)/∂φ * A + (V·n) * ∂ρ_face/∂φ * A
+                    //                 ^^^^^^^^^^^^^^^^^     ^^^^^^^^^^^^^^^^^
+                    //                 (already included)    (add this term)
+                    //
+                    // For ρ_upwind: ∂ρ/∂φ = ∂ρ/∂V * ∂V/∂φ
+                    // Using isentropic relation: ∂ρ/∂V = -ρ * M∞² * V / (ρ^(γ-1))
+                    //                                  = -ρ^(2-γ) * M∞² * V
+                    //
+                    // Compute face velocity and normal velocity
+                    const uFace = this.spatialDisc_.uFace_[face];
+                    const vFace = this.spatialDisc_.vFace_[face];
+                    const vDotN = uFace * nx + vFace * ny;
+                    
+                    // Determine upwind element
+                    var upwindElem: int;
+                    if vDotN >= 0.0 {
+                        upwindElem = elem1;
+                    } else {
+                        upwindElem = elem2;
+                    }
+                    
+                    // Compute local Mach at upwind cell
+                    const rhoUpwind = this.spatialDisc_.rhorho_[upwindElem];
+                    const uUpwind = this.spatialDisc_.uu_[upwindElem];
+                    const vUpwind = this.spatialDisc_.vv_[upwindElem];
+                    const machUpwind = this.spatialDisc_.mach(uUpwind, vUpwind, rhoUpwind);
+                    
+                    // Switching function
+                    const mu_upwind = this.inputs_.MU_C_ * max(0.0, machUpwind*machUpwind - this.inputs_.MACH_C_*this.inputs_.MACH_C_);
+                    
+                    // Add density retardation if in supersonic region
+                    if mu_upwind > 0.0 {
+                        // ∂ρ_upwind/∂V = -ρ^(2-γ) * M∞² * V
+                        const gamma = this.inputs_.GAMMA_;
+                        const Minf2 = this.inputs_.MACH_ * this.inputs_.MACH_;
+                        const velMag2 = uUpwind*uUpwind + vUpwind*vUpwind;
+                        const drho_dVelMag = -rhoUpwind**(2.0-gamma) * Minf2 * sqrt(velMag2);
+                        
+                        // ∂V/∂φ for upwind cell (from gradient)
+                        // ∂|V|/∂φ_upwind ≈ -sumW_upwind · (V/|V|)
+                        const velMag = sqrt(velMag2);
+                        var dVelMag_dPhi_upwind = 0.0;
+                        if velMag > 1e-10 {
+                            const sumWx_upwind = this.spatialDisc_.lsGradQR_!.sumWx_[upwindElem];
+                            const sumWy_upwind = this.spatialDisc_.lsGradQR_!.sumWy_[upwindElem];
+                            dVelMag_dPhi_upwind = (-sumWx_upwind * uUpwind - sumWy_upwind * vUpwind) / velMag;
+                        }
+                        
+                        // ∂ρ_face/∂φ_upwind = μ * ∂ρ_upwind/∂φ_upwind
+                        const drhoFace_dPhi_upwind = mu_upwind * drho_dVelMag * dVelMag_dPhi_upwind;
+                        
+                        // Add contribution to Jacobian: (V·n) * ∂ρ_face/∂φ_upwind * A
+                        const densityRetardation = vDotN * drhoFace_dPhi_upwind * area;
+                        
+                        if upwindElem == elem {
+                            // Add to diagonal
+                            diag += sign * densityRetardation;
+                        }
+                        // Note: off-diagonal contribution for upwind neighbor is handled below
+                    }
+                    
                     // === OFF-DIAGONAL CONTRIBUTION ===
                     const sumWx_neighbor = this.spatialDisc_.lsGradQR_!.sumWx_[neighbor];
                     const sumWy_neighbor = this.spatialDisc_.lsGradQR_!.sumWy_[neighbor];
@@ -342,6 +408,24 @@ class temporalDiscretization {
                     
                     // Direct phi term
                     offdiag += directCoeff * area * rhoFace;
+                    
+                    // Add density retardation for off-diagonal if neighbor is upwind
+                    if mu_upwind > 0.0 && upwindElem == neighbor {
+                        const gamma = this.inputs_.GAMMA_;
+                        const Minf2 = this.inputs_.MACH_ * this.inputs_.MACH_;
+                        const velMag2 = uUpwind*uUpwind + vUpwind*vUpwind;
+                        const drho_dVelMag = -rhoUpwind**(2.0-gamma) * Minf2 * sqrt(velMag2);
+                        
+                        const velMag = sqrt(velMag2);
+                        var dVelMag_dPhi_neighbor = 0.0;
+                        if velMag > 1e-10 {
+                            dVelMag_dPhi_neighbor = (-sumWx_neighbor * uUpwind - sumWy_neighbor * vUpwind) / velMag;
+                        }
+                        
+                        const drhoFace_dPhi_neighbor = mu_upwind * drho_dVelMag * dVelMag_dPhi_neighbor;
+                        const densityRetardation = vDotN * drhoFace_dPhi_neighbor * area;
+                        offdiag += sign * densityRetardation;
+                    }
                     
                     this.A_petsc.add(elem-1, neighbor-1, offdiag);
 
