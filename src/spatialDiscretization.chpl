@@ -111,6 +111,11 @@ class spatialDiscretization {
         this.one_over_gamma_minus_one_ = 1.0 / (this.inputs_.GAMMA_ - 1.0);
     }
 
+    // Update the inputs record (used for Mach continuation)
+    proc updateInputs(ref newInputs: potentialInputs) {
+        this.inputs_ = newInputs;
+    }
+
     proc initializeMetrics() {
         for face in this.mesh_.edgeWall_ {
             const elem1 = this.mesh_.edge2elem_[1, face];

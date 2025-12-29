@@ -22,6 +22,7 @@ config const OMEGA_CIRCULATION : real(64); // Relaxation factor for circulation 
 config const OMEGA : real(64); // Relaxation factor for the iterative solver
 config const IT_MAX : int;
 config const CONV_TOL : real(64);
+config const CONV_ATOL : real(64) = 1e-15;  // Absolute convergence tolerance for residual
 config const X_REF : real(64);
 config const Y_REF : real(64);
 config const MU_C : real(64);
@@ -29,6 +30,16 @@ config const MACH_C : real(64);
 config const BETA : real(64); // Level of upwinding in Jacobian matrix
 
 config const LINE_SEARCH : bool;
+
+// Selective Frequency Damping (SFD) parameters (Jordi et al. 2014 encapsulated formulation)
+config const SFD_ENABLED : bool = false;     // Enable SFD acceleration
+config const SFD_CHI : real(64) = 0.5;       // Damping coefficient χ (0.1-1.0 typical)
+config const SFD_DELTA : real(64) = 0.1;     // Filter width Δ = ωc·dt (0.01-0.5 typical)
+
+// Mach continuation parameters
+config const MACH_CONTINUATION : bool = false;  // Enable Mach continuation
+config const MACH_START : real(64) = 0.5;       // Starting Mach number for continuation
+config const MACH_STEP : real(64) = 0.05;       // Mach number increment per step
 
 config const GMRES_RTOL : real(64);
 config const GMRES_ATOL : real(64);
@@ -69,6 +80,7 @@ record potentialInputs {
     var OMEGA_ : real(64) = OMEGA;
     var IT_MAX_: int = IT_MAX;
     var CONV_TOL_ : real(64) = CONV_TOL;
+    var CONV_ATOL_ : real(64) = CONV_ATOL;  // Absolute convergence tolerance
     
     var RHO_INF_: real(64) = 1.0;
     var VEL_INF_: real(64) = 1.0;
@@ -87,6 +99,17 @@ record potentialInputs {
     var BETA_: real(64) = BETA;
 
     var LINE_SEARCH_: bool = LINE_SEARCH;
+
+    // SFD parameters
+    var SFD_ENABLED_: bool = SFD_ENABLED;
+    var SFD_CHI_: real(64) = SFD_CHI;
+    var SFD_DELTA_: real(64) = SFD_DELTA;
+
+    // Mach continuation parameters
+    var MACH_CONTINUATION_: bool = MACH_CONTINUATION;
+    var MACH_START_: real(64) = MACH_START;
+    var MACH_STEP_: real(64) = MACH_STEP;
+    var MACH_TARGET_: real(64) = MACH;  // Store the target Mach number
 
     var GMRES_RTOL_: real(64) = GMRES_RTOL;
     var GMRES_ATOL_: real(64) = GMRES_ATOL;
@@ -123,5 +146,17 @@ record potentialInputs {
         writeln("Y_REF = ", Y_REF);
         writeln("MU_C = ", MU_C);
         writeln("MACH_C = ", MACH_C);
+        if MACH_CONTINUATION {
+            writeln("MACH_CONTINUATION enabled: ", MACH_START, " -> ", MACH, " (step ", MACH_STEP, ")");
+        }
+    }
+
+    // Update Mach number and recompute derived quantities
+    proc ref setMach(newMach: real(64)) {
+        this.MACH_ = newMach;
+        this.a_INF_ = this.VEL_INF_ / this.MACH_;
+        this.P_INF_ = this.RHO_INF_ ** this.GAMMA_ / (this.GAMMA_ * this.MACH_ * this.MACH_);
+        this.beta_crit_ = this.MACH_**2 * this.q_crit_ / (1 + (this.GAMMA_ - 1)/2 * this.MACH_**2 * (1 - this.q_crit_**2));
+        this.rho_crit_ = (1.0 + (this.GAMMA_ - 1)/2 * this.MACH_ * this.MACH_ * (1.0 - this.q_crit_ * this.q_crit_)) ** (1.0 / (this.GAMMA_ - 1.0));
     }
 }

@@ -64,7 +64,7 @@ def readCGNS(filename) :
         return data
 
 
-data = readCGNS("../output/output_384.cgns")
+data = readCGNS("../output/output_633.cgns")
 
 
 plt.figure()

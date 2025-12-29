@@ -41,6 +41,12 @@ class temporalDiscretization {
     var dgradY_dGamma_: [gradSensitivity_dom] real(64);
     var Jij_: [gradSensitivity_dom] real(64);
 
+    // Selective Frequency Damping (SFD) - Jordi et al. 2014 encapsulated formulation
+    // Filters low-frequency oscillations to accelerate convergence
+    // φ_bar is the temporally filtered solution
+    var phi_bar_: [gradSensitivity_dom] real(64);
+    var circulation_bar_: real(64) = 0.0;
+
     proc init(spatialDisc: shared spatialDiscretization, ref inputs: potentialInputs) {
         writeln("Initializing temporal discretization...");
         this.spatialDisc_ = spatialDisc;
@@ -93,6 +99,11 @@ class temporalDiscretization {
 
         // Initialize gradient sensitivity arrays
         this.gradSensitivity_dom = {1..spatialDisc.nelemDomain_};
+
+        // Print SFD status
+        if this.inputs_.SFD_ENABLED_ {
+            writeln("SFD enabled: χ = ", this.inputs_.SFD_CHI_, ", Δ = ", this.inputs_.SFD_DELTA_);
+        }
     }
 
     proc initializeJacobian() {
@@ -185,21 +196,6 @@ class temporalDiscretization {
                 this.dgradY_dGamma_[elem] = dgy;
             }
         }
-
-        // // Debug: count cells with non-zero gradient sensitivity
-        // if this.it_ == 1 {
-        //     var count = 0;
-        //     var maxDgx = 0.0, maxDgy = 0.0;
-        //     for elem in 1..this.spatialDisc_.nelemDomain_ {
-        //         if this.dgradX_dGamma_[elem] != 0.0 || this.dgradY_dGamma_[elem] != 0.0 {
-        //             count += 1;
-        //             if abs(this.dgradX_dGamma_[elem]) > maxDgx then maxDgx = abs(this.dgradX_dGamma_[elem]);
-        //             if abs(this.dgradY_dGamma_[elem]) > maxDgy then maxDgy = abs(this.dgradY_dGamma_[elem]);
-        //         }
-        //     }
-        //     writeln("DEBUG: Cells with non-zero grad sensitivity: ", count,
-        //             " max|dgradX|: ", maxDgx, " max|dgradY|: ", maxDgy);
-        // }
     }
 
     proc computeJacobian() {
@@ -653,11 +649,42 @@ class temporalDiscretization {
         this.initializeJacobian();
         this.computeGradientSensitivity();
         this.computeJacobian();
+
+        // Initialize SFD filtered state to initial solution
+        if this.inputs_.SFD_ENABLED_ {
+            forall elem in 1..this.spatialDisc_.nelemDomain_ {
+                this.phi_bar_[elem] = this.spatialDisc_.phi_[elem];
+            }
+            this.circulation_bar_ = this.spatialDisc_.circulation_;
+        }
+    }
+
+    // Reset solver state for Mach continuation (keeps current solution as initial guess)
+    // newInputs should have the updated Mach number and derived quantities
+    proc resetForContinuation(ref newInputs: potentialInputs) {
+        this.it_ = 0;
+        
+        // Update the inputs record in this class and in spatialDiscretization
+        this.inputs_ = newInputs;
+        this.spatialDisc_.updateInputs(newInputs);
+        
+        // Recompute Jacobian sparsity pattern (in case it changed, though typically it doesn't)
+        this.computeGradientSensitivity();
+        this.computeJacobian();
+
+        // Reset SFD filtered state to current solution
+        if this.inputs_.SFD_ENABLED_ {
+            forall elem in 1..this.spatialDisc_.nelemDomain_ {
+                this.phi_bar_[elem] = this.spatialDisc_.phi_[elem];
+            }
+            this.circulation_bar_ = this.spatialDisc_.circulation_;
+        }
     }
 
     proc solve() {
         var normalized_res: real(64) = 1e12;
         var first_res : real(64) = 1e12;
+        var res : real(64) = 1e12;        // Current residual (absolute)
         var res_prev : real(64) = 1e12;  // Previous iteration residual for line search
         var omega : real(64) = this.inputs_.OMEGA_;  // Current relaxation factor
         const OMEGA_MIN : real(64) = 0.1;  // Minimum allowed OMEGA
@@ -668,7 +695,16 @@ class temporalDiscretization {
         var phi_backup: [1..this.spatialDisc_.nelemDomain_] real(64);
         var circulation_backup: real(64);
         
-        while (normalized_res > this.inputs_.CONV_TOL_ && this.it_ < this.inputs_.IT_MAX_ && isNan(normalized_res) == false) {
+        // Compute initial residual to check if already converged (useful for Mach continuation)
+        this.spatialDisc_.run();
+        res = RMSE(this.spatialDisc_.res_, this.spatialDisc_.elemVolume_);
+        first_res = res;
+        normalized_res = 1.0;
+        
+        // Convergence check: either relative tolerance OR absolute tolerance
+        // The absolute tolerance is important for Mach continuation where the 
+        // initial residual may already be very small
+        while ((normalized_res > this.inputs_.CONV_TOL_ && res > this.inputs_.CONV_ATOL_) && this.it_ < this.inputs_.IT_MAX_ && isNan(normalized_res) == false) {
             this.it_ += 1;
             time.start();
 
@@ -686,7 +722,6 @@ class temporalDiscretization {
             const (its, reason) = GMRES(this.ksp, this.A_petsc, this.b_petsc, this.x_petsc);
             
             var lineSearchIts = 0;
-            var res: real(64);
             omega = this.inputs_.OMEGA_;
             
             if this.inputs_.LINE_SEARCH_ {
@@ -733,6 +768,68 @@ class temporalDiscretization {
                 this.spatialDisc_.circulation_ += omega * this.x_petsc.get(this.gammaIndex_);
                 
                 // Compute residual for convergence check
+                this.spatialDisc_.run();
+                res = RMSE(this.spatialDisc_.res_, this.spatialDisc_.elemVolume_);
+            }
+
+            // === SELECTIVE FREQUENCY DAMPING (SFD) ===
+            // Jordi et al. 2014 encapsulated formulation (Physics of Fluids 26, 034101)
+            // 
+            // The SFD method is applied using a splitting approach where the solver
+            // output is treated as Φ(q^n) and then the exact solution of the linear
+            // SFD system is applied via matrix exponential:
+            //
+            //   [q^{n+1}  ]       [Φ(q^n)]
+            //   [         ] = e^{LΔt} [      ]
+            //   [q̄^{n+1}]       [q̄^n  ]
+            //
+            // where the matrix exponential e^{LΔt} from Eq. (9) is:
+            //
+            //   e^{LΔt} = 1/(1+χΔ) * [1 + χΔ·E      χΔ(1-E)  ]
+            //                        [1 - E        χΔ + E   ]
+            //
+            // with E = exp(-(χ + 1/Δ)·Δt) and Δt = 1 (one iteration = one time unit)
+            //
+            // Parameters:
+            //   χ (SFD_CHI): control coefficient, strength of feedback damping
+            //   Δ (SFD_DELTA): filter width, related to cutoff frequency
+            //
+            if this.inputs_.SFD_ENABLED_ {
+                const chi = this.inputs_.SFD_CHI_;
+                const delta = this.inputs_.SFD_DELTA_;
+                const dt = 1.0;  // One Newton iteration = one time unit
+                
+                // Compute the exponential factor E = exp(-(χ + 1/Δ)·Δt)
+                const exponent = -(chi + 1.0/delta) * dt;
+                const E = exp(exponent);
+                
+                // Matrix exponential coefficients from Jordi Eq. (9)
+                const scale = 1.0 / (1.0 + chi * delta);
+                const M11 = scale * (1.0 + chi * delta * E);        // coefficient for q from q*
+                const M12 = scale * chi * delta * (1.0 - E);        // coefficient for q from q̄
+                const M21 = scale * (1.0 - E);                      // coefficient for q̄ from q*
+                const M22 = scale * (chi * delta + E);              // coefficient for q̄ from q̄
+                
+                // Apply matrix exponential to (φ*, φ̄) where φ* = Φ(φ^n) is Newton result
+                forall elem in 1..this.spatialDisc_.nelemDomain_ {
+                    const phi_star = this.spatialDisc_.phi_[elem];  // Result from Newton (Φ(q^n))
+                    const phi_bar = this.phi_bar_[elem];            // Previous filtered state
+                    
+                    // Apply encapsulated SFD transform
+                    const phi_new = M11 * phi_star + M12 * phi_bar;
+                    const phi_bar_new = M21 * phi_star + M22 * phi_bar;
+                    
+                    this.spatialDisc_.phi_[elem] = phi_new;
+                    this.phi_bar_[elem] = phi_bar_new;
+                }
+                
+                // Apply same transform to circulation
+                const gamma_star = this.spatialDisc_.circulation_;
+                const gamma_bar = this.circulation_bar_;
+                this.spatialDisc_.circulation_ = M11 * gamma_star + M12 * gamma_bar;
+                this.circulation_bar_ = M21 * gamma_star + M22 * gamma_bar;
+
+                // Recompute residual after SFD modification
                 this.spatialDisc_.run();
                 res = RMSE(this.spatialDisc_.res_, this.spatialDisc_.elemVolume_);
             }
