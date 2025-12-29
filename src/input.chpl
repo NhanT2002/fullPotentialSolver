@@ -47,6 +47,10 @@ config const GMRES_DTOL : real(64);
 config const GMRES_MAXIT : int;
 config const GMRES_RESTART : int;
 config const GMRES_PRECON : string;
+config const GMRES_PRECON_SIDE : string = "right";  // Preconditioning side: "left" or "right"
+config const JACOBIAN_TYPE : string = "analytical";  // Jacobian type: "analytical" or "numerical"
+config const USE_NATIVE_GMRES : bool = false;  // Use Chapel-native GMRES instead of PETSc
+
 
 config const DUAL_TIME_STEP : bool;
 config const ALPHA_0 : real(64);
@@ -117,6 +121,9 @@ record potentialInputs {
     var GMRES_MAXIT_: int = GMRES_MAXIT;
     var GMRES_RESTART_: int = GMRES_RESTART;
     var GMRES_PRECON_: string = GMRES_PRECON;
+    var GMRES_PRECON_SIDE_: string = GMRES_PRECON_SIDE;
+    var JACOBIAN_TYPE_: string = JACOBIAN_TYPE;
+    var USE_NATIVE_GMRES_: bool = USE_NATIVE_GMRES;
 
     var DUAL_TIME_STEP_: bool = DUAL_TIME_STEP;
     var ALPHA_0_: real(64) = ALPHA_0;

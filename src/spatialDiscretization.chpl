@@ -673,6 +673,14 @@ class spatialDiscretization {
         }
     }
 
+    // Lightweight flux computation for Jv - skips machFace and velMagFace
+    proc computeFluxes_jv() {
+        forall face in 1..this.nface_ {
+            this.flux_[face] = this.rhoFace_[face] * (this.uFace_[face] * this.faceNormalX_[face] 
+                            + this.vFace_[face] * this.faceNormalY_[face]) * this.faceArea_[face];
+        }
+    }
+
     proc computeResiduals() {
         // Compute residuals per element from face fluxes
         forall elem in 1..this.nelemDomain_ {
@@ -709,6 +717,39 @@ class spatialDiscretization {
         this.artificialDensity();
         this.computeFluxes();
         this.computeResiduals();
+    }
+
+    // Lightweight run for Jacobian-vector products - skips machmach/mumu computation
+    // These are only needed for upwinding in artificialDensity, which uses the upwind
+    // cell's mumu value. For finite difference Jv, we can reuse the mumu from the
+    // base state since the perturbation is small.
+    proc run_jv() {
+        this.updateGhostCellsPhi();         // Update ghost phi values for gradient computation
+        this.computeVelocityFromPhiLeastSquaresQR();
+        this.computeDensityFromVelocity();
+        this.updateGhostCellsVelocity();    // Update ghost velocities for flux computation
+        this.computeFaceProperties();
+        this.artificialDensity();
+        this.computeFluxes();
+        this.computeResiduals();
+    }
+
+    // Lightweight density computation - skips machmach and mumu (reuse from base state)
+    proc computeDensityFromVelocity_jv() {
+        forall elem in 1..this.nelemDomain_ {
+            this.rhorho_[elem] = (1.0 + this.gamma_minus_one_over_two_ * this.inputs_.MACH_ * this.inputs_.MACH_ * 
+                                 (1.0 - this.uu_[elem] * this.uu_[elem] - this.vv_[elem] * this.vv_[elem])) ** this.one_over_gamma_minus_one_;
+            // Skip machmach and mumu - they're only needed for upwinding direction
+            // and we reuse the values from the unperturbed state
+        }
+
+        forall face in this.mesh_.edgeWall_ {
+            const elem1 = this.mesh_.edge2elem_[1, face];
+            const elem2 = this.mesh_.edge2elem_[2, face];
+            const (interiorElem, ghostElem) = 
+                if elem1 <= this.nelemDomain_ then (elem1, elem2) else (elem2, elem1);
+            this.rhorho_[ghostElem] = this.rhorho_[interiorElem];
+        }
     }
 
     proc computeAerodynamicCoefficients() {

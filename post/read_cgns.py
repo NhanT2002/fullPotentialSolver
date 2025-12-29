@@ -75,8 +75,9 @@ def readHSPM(filename) :
             'Cp_wall': cp}
 
 data = readCGNS("../output/output_773.cgns")
-data2 = readCGNS("../output/output_793.cgns")
-data3 = readCGNS("../output/output_811.cgns")  # CONVERGED: ENTROPY_BLEND=0.5, 3000 it
+data = readCGNS("../output/output_846.cgns")
+data2 = readCGNS("../output/output_855.cgns")
+data3 = readCGNS("../output/output_856.cgns")  # CONVERGED: ENTROPY_BLEND=0.5, 3000 it
 
 data_hspm = readHSPM("../output/HSPM_naca0012_A1-25.dat")
 

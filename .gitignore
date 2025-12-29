@@ -7,3 +7,4 @@ bin/*
 *.pdf
 *.out
 doc/
+*.log

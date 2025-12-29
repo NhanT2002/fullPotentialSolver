@@ -12,6 +12,135 @@ use C_PETSC;
 use petsc;
 use CTypes;
 use List;
+use gmres;
+use Sort;
+
+// ============================================================================
+// Jacobian-Vector Product Provider for Matrix-Free Newton-Krylov
+// Uses finite differences: Jv = (R(phi + h*v) - R(phi)) / h (Blazek Eq. 6.62)
+// ============================================================================
+class JacobianVectorProductProvider {
+    var spatialDisc_: shared spatialDiscretization;
+    var n_: int;  // Number of domain elements
+    
+    // State for finite difference computation
+    var phi_current_dom_: domain(1);
+    var phi_current_: [phi_current_dom_] real(64);
+    var gamma_current_: real(64);
+    var R0_: [phi_current_dom_] real(64);
+    var kutta_res0_: real(64);
+    
+    // Temporary storage for perturbed residual
+    var phi_backup_dom_: domain(1);
+    var phi_backup_: [phi_backup_dom_] real(64);
+    
+    // Backup arrays for intermediate quantities (avoid recomputing run() after restore)
+    var uu_backup_: [phi_backup_dom_] real(64);
+    var vv_backup_: [phi_backup_dom_] real(64);
+    var rhorho_backup_: [phi_backup_dom_] real(64);
+    var res_backup_: [phi_backup_dom_] real(64);
+    
+    proc init(spatialDisc: shared spatialDiscretization) {
+        this.spatialDisc_ = spatialDisc;
+        this.n_ = spatialDisc.nelemDomain_;
+        this.phi_current_dom_ = {1..this.n_};
+        this.phi_backup_dom_ = {1..this.n_};
+    }
+    
+    // Store the current state for finite difference computation
+    proc ref setState(const ref phi: [] real(64), gamma: real(64),
+                      const ref R0: [] real(64), kutta_res0: real(64)) {
+        forall i in 1..n_ {
+            this.phi_current_[i] = phi[i];
+            this.R0_[i] = R0[i-1];  // R0 is 0-indexed from GMRES
+        }
+        this.gamma_current_ = gamma;
+        this.kutta_res0_ = kutta_res0;
+    }
+    
+    // Apply the Jacobian-vector product: result = J * v
+    // Uses finite differences: Jv = (R(phi + h*v) - R(phi)) / h
+    proc ref apply(ref result: [] real(64), const ref v: [] real(64)) {
+        // Blazek Eq. 6.63: Step size calculation
+        // h = sqrt(eps) * max(|d|, typ_W * ||W||) * sign(d) / ||v||
+        const eps = 1.0e-14;  // Machine epsilon for float64
+        const sqrtEps = sqrt(eps);
+        const typ_W = 1.0;  // Typical magnitude of solution components
+        
+        // Compute ||v||
+        var vnorm = 0.0;
+        forall i in 0..#n_ with (+ reduce vnorm) {
+            vnorm += v[i] * v[i];
+        }
+        // Include circulation component
+        vnorm += v[n_] * v[n_];
+        vnorm = sqrt(vnorm);
+        
+        // Avoid division by zero
+        if vnorm < 1.0e-30 {
+            forall i in 0..#(n_+1) do result[i] = 0.0;
+            return;
+        }
+        
+        // Compute d = phi · v (dot product with solution)
+        var d = 0.0;
+        forall i in 1..n_ with (+ reduce d) {
+            d += phi_current_[i] * v[i-1];  // v is 0-indexed
+        }
+        // Include circulation contribution
+        d += gamma_current_ * v[n_];
+        
+        // Compute ||phi|| for scaling
+        var phinorm = 0.0;
+        forall i in 1..n_ with (+ reduce phinorm) {
+            phinorm += phi_current_[i] * phi_current_[i];
+        }
+        phinorm += gamma_current_ * gamma_current_;
+        phinorm = sqrt(phinorm);
+        
+        // Step size (Blazek Eq. 6.63)
+        // Use a smaller, more conservative step size for better accuracy
+        var h = 1.0e-8 * max(1.0, phinorm);
+        
+        // Save current spatial discretization state (phi, circulation, and derived quantities)
+        forall i in 1..n_ {
+            phi_backup_[i] = this.spatialDisc_.phi_[i];
+            uu_backup_[i] = this.spatialDisc_.uu_[i];
+            vv_backup_[i] = this.spatialDisc_.vv_[i];
+            rhorho_backup_[i] = this.spatialDisc_.rhorho_[i];
+            res_backup_[i] = this.spatialDisc_.res_[i];
+        }
+        const gamma_backup = this.spatialDisc_.circulation_;
+        const kutta_res_backup = this.spatialDisc_.kutta_res_;
+        
+        // Perturb solution: phi = phi_current + h * v
+        forall i in 1..n_ {
+            this.spatialDisc_.phi_[i] = phi_current_[i] + h * v[i-1];
+        }
+        this.spatialDisc_.circulation_ = gamma_current_ + h * v[n_];
+        
+        // Compute perturbed residual R(phi + h*v) using lightweight run_jv
+        this.spatialDisc_.run_jv();
+        
+        // Finite difference approximation: Jv = (R_perturbed - R0) / h
+        const invH = 1.0 / h;
+        forall i in 0..#n_ {
+            result[i] = (this.spatialDisc_.res_[i+1] - R0_[i+1]) * invH;
+        }
+        result[n_] = (this.spatialDisc_.kutta_res_ - kutta_res0_) * invH;
+        
+        // Restore original spatial discretization state (no need to call run() again!)
+        forall i in 1..n_ {
+            this.spatialDisc_.phi_[i] = phi_backup_[i];
+            this.spatialDisc_.uu_[i] = uu_backup_[i];
+            this.spatialDisc_.vv_[i] = vv_backup_[i];
+            this.spatialDisc_.rhorho_[i] = rhorho_backup_[i];
+            this.spatialDisc_.res_[i] = res_backup_[i];
+        }
+        this.spatialDisc_.circulation_ = gamma_backup;
+        this.spatialDisc_.kutta_res_ = kutta_res_backup;
+    }
+}
 
 class temporalDiscretization {
     var spatialDisc_: shared spatialDiscretization;
@@ -25,6 +154,17 @@ class temporalDiscretization {
     var x_petsc : owned PETSCvector_c;
     var b_petsc : owned PETSCvector_c;
     var ksp : owned PETSCksp_c;
+
+    // Native GMRES solver components
+    var nativeGmres_: GMRESSolver;
+    
+    // Matrix-free Jacobian-vector product provider (must come after nativeGmres_ for init order)
+    var jvpProvider_: owned JacobianVectorProductProvider?;
+    
+    var A_csr_: SparseMatrixCSR;
+    var x_native_dom_: domain(1) = {0..#1};
+    var x_native_: [x_native_dom_] real(64);
+    var b_native_: [x_native_dom_] real(64);
 
     var timeList_ = new list(real(64));
     var itList_ = new list(int);
@@ -97,8 +237,61 @@ class temporalDiscretization {
             this.ksp.setPreconditioner("none");
         }
 
+        // Initialize native GMRES arrays (must come before gradSensitivity_dom for field order)
+        if this.inputs_.USE_NATIVE_GMRES_ {
+            writeln("Using native Chapel GMRES solver");
+            this.x_native_dom_ = {0..#N};
+        }
+        
         // Initialize gradient sensitivity arrays
         this.gradSensitivity_dom = {1..spatialDisc.nelemDomain_};
+
+        // Initialize native GMRES solver (after other fields)
+        if this.inputs_.USE_NATIVE_GMRES_ {
+            // Determine preconditioner type
+            var preconType = PreconditionerType.None;
+            if this.inputs_.GMRES_PRECON_ == "jacobi" {
+                writeln("Using Jacobi preconditioner for native GMRES");
+                preconType = PreconditionerType.Jacobi;
+            } else if this.inputs_.GMRES_PRECON_ == "ilu" {
+                writeln("Using ILU(0) preconditioner for native GMRES");
+                preconType = PreconditionerType.ILU0;
+            } else {
+                writeln("Using no preconditioner for native GMRES");
+            }
+            
+            // Determine preconditioning side
+            var preconSide = PreconSide.Right;
+            if this.inputs_.GMRES_PRECON_SIDE_ == "left" {
+                writeln("Using LEFT preconditioning (preconditioned residual)");
+                preconSide = PreconSide.Left;
+            } else {
+                writeln("Using RIGHT preconditioning (true residual)");
+                preconSide = PreconSide.Right;
+            }
+            
+            // Print Jacobian type
+            if this.inputs_.JACOBIAN_TYPE_ == "numerical" {
+                writeln("Using NUMERICAL (matrix-free) Jacobian via finite differences (Blazek Eq. 6.62)");
+            } else {
+                writeln("Using ANALYTICAL Jacobian");
+            }
+            
+            this.nativeGmres_ = new GMRESSolver(
+                N, 
+                inputs.GMRES_RESTART_,
+                inputs.GMRES_MAXIT_,
+                inputs.GMRES_RTOL_,
+                inputs.GMRES_ATOL_,
+                preconType,
+                preconSide
+            );
+            
+            // Initialize JVP provider if numerical Jacobian (after nativeGmres_ for field order)
+            if this.inputs_.JACOBIAN_TYPE_ == "numerical" {
+                this.jvpProvider_ = new owned JacobianVectorProductProvider(spatialDisc);
+            }
+        }
 
         // Print SFD status
         if this.inputs_.SFD_ENABLED_ {
@@ -640,6 +833,127 @@ class temporalDiscretization {
         
         this.A_petsc.assemblyComplete();
         // this.A_petsc.matView();
+        
+        // Extract CSR matrix for native GMRES if enabled
+        if this.inputs_.USE_NATIVE_GMRES_ {
+            this.extractCSRFromPETSc();
+            this.nativeGmres_.setupPreconditioner(this.A_csr_);
+        }
+    }
+    
+    // Build CSR sparsity pattern from mesh connectivity (call once during init)
+    proc buildCSRSparsityPattern() {
+        const n = this.spatialDisc_.nelemDomain_ + 1;
+        
+        // Count non-zeros per row based on mesh connectivity
+        var nnzPerRow: [0..#n] int;
+        
+        for elem in 1..this.spatialDisc_.nelemDomain_ {
+            // Diagonal
+            var count = 1;
+            // Neighbors
+            const faces = this.spatialDisc_.mesh_.elem2edge_[
+                this.spatialDisc_.mesh_.elem2edgeIndex_[elem] + 1 .. 
+                this.spatialDisc_.mesh_.elem2edgeIndex_[elem + 1]];
+            for face in faces {
+                const elem1 = this.spatialDisc_.mesh_.edge2elem_[1, face];
+                const elem2 = this.spatialDisc_.mesh_.edge2elem_[2, face];
+                const neighbor = if elem1 == elem then elem2 else elem1;
+                if neighbor <= this.spatialDisc_.nelemDomain_ {
+                    count += 1;
+                }
+            }
+            // Connection to circulation
+            count += 1;
+            nnzPerRow[elem-1] = count;
+        }
+        // Last row (Kutta condition): connected to Γ, upper TE, lower TE
+        nnzPerRow[n-1] = 5;
+        
+        // Total non-zeros
+        var totalNnz = 0;
+        for i in 0..#n do totalNnz += nnzPerRow[i];
+        
+        // Initialize CSR structure
+        this.A_csr_ = new SparseMatrixCSR(n, totalNnz);
+        
+        // Build row pointers
+        var k = 0;
+        for i in 0..#n {
+            this.A_csr_.rowPtr[i] = k;
+            k += nnzPerRow[i];
+        }
+        this.A_csr_.rowPtr[n] = k;
+        
+        // Build column indices (sorted order within each row)
+        for elem in 1..this.spatialDisc_.nelemDomain_ {
+            const row = elem - 1;
+            var cols: [0..#nnzPerRow[row]] int;
+            var idx = 0;
+            
+            // Collect all column indices
+            cols[idx] = row;  // diagonal
+            idx += 1;
+            
+            const faces = this.spatialDisc_.mesh_.elem2edge_[
+                this.spatialDisc_.mesh_.elem2edgeIndex_[elem] + 1 .. 
+                this.spatialDisc_.mesh_.elem2edgeIndex_[elem + 1]];
+            for face in faces {
+                const elem1 = this.spatialDisc_.mesh_.edge2elem_[1, face];
+                const elem2 = this.spatialDisc_.mesh_.edge2elem_[2, face];
+                const neighbor = if elem1 == elem then elem2 else elem1;
+                if neighbor <= this.spatialDisc_.nelemDomain_ {
+                    cols[idx] = neighbor - 1;
+                    idx += 1;
+                }
+            }
+            // Connection to circulation (last column)
+            cols[idx] = n - 1;
+            idx += 1;
+            
+            // Sort columns
+            sort(cols);
+            
+            // Copy to CSR
+            const rowStart = this.A_csr_.rowPtr[row];
+            for i in 0..#idx {
+                this.A_csr_.colIdx[rowStart + i] = cols[i];
+            }
+        }
+        
+        // Last row (Kutta): Γ, upper TE, lower TE
+        const gammaRow = n - 1;
+        const rowStart = this.A_csr_.rowPtr[gammaRow];
+        var kuttaCols: [0..#5] int;
+        kuttaCols[0] = this.spatialDisc_.lowerTEelem_ - 1;
+        kuttaCols[1] = this.spatialDisc_.upperTEelem_ - 1;
+        kuttaCols[2] = gammaRow;  // diagonal
+        // Note: actual nnz might be less, just use what's needed
+        sort(kuttaCols[0..2]);
+        for i in 0..2 {
+            this.A_csr_.colIdx[rowStart + i] = kuttaCols[i];
+        }
+        // Pad remaining
+        for i in 3..4 {
+            this.A_csr_.colIdx[rowStart + i] = gammaRow;
+        }
+        
+        this.A_csr_.buildDiagonalIndex();
+    }
+    
+    // Update CSR values from PETSc matrix (called each iteration)
+    proc extractCSRFromPETSc() {
+        const n = this.spatialDisc_.nelemDomain_ + 1;
+        
+        // Copy values using known sparsity pattern
+        for i in 0..#n {
+            const rowStart = this.A_csr_.rowPtr[i];
+            const rowEnd = this.A_csr_.rowPtr[i + 1];
+            for k in rowStart..rowEnd-1 {
+                const j = this.A_csr_.colIdx[k];
+                this.A_csr_.values[k] = this.A_petsc.get(i, j);
+            }
+        }
     }
 
     proc initialize() {
@@ -648,6 +962,12 @@ class temporalDiscretization {
         this.spatialDisc_.initializeSolution();
         this.initializeJacobian();
         this.computeGradientSensitivity();
+        
+        // Build CSR sparsity pattern for native GMRES (must be after initializeJacobian)
+        if this.inputs_.USE_NATIVE_GMRES_ {
+            this.buildCSRSparsityPattern();
+        }
+        
         this.computeJacobian();
 
         // Initialize SFD filtered state to initial solution
@@ -700,7 +1020,6 @@ class temporalDiscretization {
         res = RMSE(this.spatialDisc_.res_, this.spatialDisc_.elemVolume_);
         first_res = res;
         normalized_res = 1.0;
-        
         // Convergence check: either relative tolerance OR absolute tolerance
         // The absolute tolerance is important for Mach continuation where the 
         // initial residual may already be very small
@@ -719,7 +1038,66 @@ class temporalDiscretization {
             this.b_petsc.set(this.gammaIndex_, -this.spatialDisc_.kutta_res_);
             this.b_petsc.assemblyComplete();
 
-            const (its, reason) = GMRES(this.ksp, this.A_petsc, this.b_petsc, this.x_petsc);
+            var its: int;
+            var reason: int;
+            
+            if this.inputs_.USE_NATIVE_GMRES_ {
+                // === NATIVE CHAPEL GMRES ===
+                const nDOF = this.spatialDisc_.nelemDomain_ + 1;
+                
+                // Copy RHS to native arrays
+                forall i in 0..#nDOF {
+                    this.b_native_[i] = this.b_petsc.get(i);
+                    this.x_native_[i] = 0.0;  // Zero initial guess
+                }
+                
+                if this.inputs_.JACOBIAN_TYPE_ == "numerical" && this.jvpProvider_ != nil {
+                    // === MATRIX-FREE NUMERICAL JACOBIAN ===
+                    // Store current residual R(phi) for finite difference
+                    var R0_native: [0..#this.spatialDisc_.nelemDomain_] real(64);
+                    forall i in 0..#this.spatialDisc_.nelemDomain_ {
+                        R0_native[i] = this.spatialDisc_.res_[i+1];
+                    }
+                    
+                    // Borrow the JVP provider
+                    var jvp: borrowed JacobianVectorProductProvider = this.jvpProvider_!.borrow();
+                    
+                    // Set state in JVP provider
+                    jvp.setState(
+                        this.spatialDisc_.phi_, 
+                        this.spatialDisc_.circulation_,
+                        R0_native, 
+                        this.spatialDisc_.kutta_res_
+                    );
+                    
+                    // Always extract CSR and update preconditioner
+                    this.extractCSRFromPETSc();
+                    
+                    const (nativeIts, nativeReason) = this.nativeGmres_.solveMatrixFreeRight(
+                        this.A_csr_, this.x_native_, this.b_native_,
+                        jvp, true
+                    );
+                    its = nativeIts;
+                    reason = nativeReason : int;
+                } else {
+                    // === ANALYTICAL JACOBIAN (standard matrix-based) ===
+                    this.extractCSRFromPETSc();
+                    const (nativeIts, nativeReason) = this.nativeGmres_.solve(this.A_csr_, this.x_native_, this.b_native_, true);
+                    its = nativeIts;
+                    reason = nativeReason : int;
+                }
+                
+                // Copy solution back to PETSc vector for line search compatibility
+                forall i in 0..#nDOF {
+                    this.x_petsc.set(i, this.x_native_[i]);
+                }
+                this.x_petsc.assemblyComplete();
+            } else {
+                // === PETSC GMRES ===
+                const (petscIts, petscReason) = GMRES(this.ksp, this.A_petsc, this.b_petsc, this.x_petsc);
+                its = petscIts;
+                reason = petscReason;
+            }
             
             var lineSearchIts = 0;
             omega = this.inputs_.OMEGA_;
