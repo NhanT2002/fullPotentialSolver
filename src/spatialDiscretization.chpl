@@ -37,6 +37,7 @@ class spatialDiscretization {
     var elemCentroidX_: [elem_dom] real(64);
     var elemCentroidY_: [elem_dom] real(64);
     var elemVolume_: [elem_dom] real(64);
+    var invElemVolume_: [elem_dom] real(64);
     var kuttaCell_: [elem_dom] int; // 1 if over wake, -1 if under wake, 9 otherwise
     var machmach_: [elem_dom] real(64);
     var mumu_: [elem_dom] real(64);
@@ -169,6 +170,7 @@ class spatialDiscretization {
                 vol += 0.5 * abs((x1-x2)*(y1+y2) + (x2-cx)*(y2+cy) + (cx-x1)*(cy+y1));
             }
             this.elemVolume_[elem] = vol;
+            this.invElemVolume_[elem] = 1.0 / vol;
         }
 
         // Compute ghost cell centroids by mirroring across boundary faces
@@ -719,7 +721,7 @@ class spatialDiscretization {
 
                 res += sign * this.flux_[face];
             }
-            this.res_[elem] = res;
+            this.res_[elem] = res * this.invElemVolume_[elem];
         }
 
         // Kutta condition residual: R_Γ = Γ - Γ_computed
@@ -831,7 +833,7 @@ class spatialDiscretization {
             gradRhoX[elem-1] = this.gradRhoX_[elem];
             gradRhoY[elem-1] = this.gradRhoY_[elem];
             pp[elem-1] = (this.rhorho_[elem]**this.inputs_.GAMMA_ / (this.inputs_.GAMMA_ * this.inputs_.MACH_ * this.inputs_.MACH_ * this.inputs_.P_INF_) - 1 ) / (this.inputs_.GAMMA_/2*this.inputs_.MACH_**2);
-            resres[elem-1] = abs(this.res_[elem]);
+            resres[elem-1] = abs(this.res_[elem] * this.elemVolume_[elem]);
             machmach[elem-1] = this.mach(this.uu_[elem], this.vv_[elem], this.rhorho_[elem]);
             xElem[elem-1] = this.elemCentroidX_[elem];
             yElem[elem-1] = this.elemCentroidY_[elem];
@@ -947,7 +949,7 @@ class spatialDiscretization {
             gradRhoX[elem-1] = this.gradRhoX_[elem];
             gradRhoY[elem-1] = this.gradRhoY_[elem];
             pp[elem-1] = (this.rhorho_[elem]**this.inputs_.GAMMA_ / (this.inputs_.GAMMA_ * this.inputs_.MACH_ * this.inputs_.MACH_ * this.inputs_.P_INF_) - 1 ) / (this.inputs_.GAMMA_/2*this.inputs_.MACH_**2);
-            resres[elem-1] = abs(this.res_[elem]);
+            resres[elem-1] = abs(this.res_[elem] * this.elemVolume_[elem]);
             machmach[elem-1] = this.mach(this.uu_[elem], this.vv_[elem], this.rhorho_[elem]);
             xElem[elem-1] = this.elemCentroidX_[elem];
             yElem[elem-1] = this.elemCentroidY_[elem];

@@ -649,7 +649,7 @@ class temporalDiscretization {
                         offdiag += sign * densityRetardation;
                     }
                     
-                    this.A_petsc.add(elem-1, neighbor-1, offdiag);
+                    this.A_petsc.add(elem-1, neighbor-1, offdiag * this.spatialDisc_.invElemVolume_[elem]);
 
                     // === CIRCULATION (Γ) DERIVATIVE ===
                     // flux = 0.5 * (∇φ_elem + ∇φ_neighbor) · m + directCoeff * (φ_neighbor - φ_elem)
@@ -814,12 +814,12 @@ class temporalDiscretization {
             }
             
             // Add diagonal entry
-            this.A_petsc.add(elem-1, elem-1, diag);
+            this.A_petsc.add(elem-1, elem-1, diag * this.spatialDisc_.invElemVolume_[elem]);
             // Store diag for possible use in upwinding
             this.Jij_[elem] = diag;
             
             // Add dRes/dΓ entry (column for circulation)
-            this.A_petsc.add(elem-1, this.gammaIndex_, dRes_dGamma);
+            this.A_petsc.add(elem-1, this.gammaIndex_, dRes_dGamma * this.spatialDisc_.invElemVolume_[elem]);
         }
 
         // === BETA-BASED UPWIND AUGMENTATION (element-centric for parallelization) ===
@@ -848,7 +848,8 @@ class temporalDiscretization {
                         // This ensures each matrix entry is only written by one task
                         if downwindElem == elem {
                             // Use precomputed invL_IJ_ (inverse of cell centroid distance)
-                            const increase = this.inputs_.BETA_ * this.spatialDisc_.velMagFace_[face] * this.spatialDisc_.invL_IJ_[face];
+                            const increase = this.inputs_.BETA_ * this.spatialDisc_.velMagFace_[face] 
+                            * this.spatialDisc_.invL_IJ_[face] * this.spatialDisc_.invElemVolume_[elem];
                             
                             // Increase absolute value of diagonal term for downwind element
                             const diagTerm = this.Jij_[elem];
@@ -1015,6 +1016,7 @@ class temporalDiscretization {
         this.spatialDisc_.initializeMetrics();
         this.spatialDisc_.initializeKuttaCells();
         this.spatialDisc_.initializeSolution();
+        this.spatialDisc_.run();
         this.initializeJacobian();
         this.computeGradientSensitivity();
         
@@ -1097,8 +1099,6 @@ class temporalDiscretization {
         while ((normalized_res > this.inputs_.CONV_TOL_ && res > this.inputs_.CONV_ATOL_) && this.it_ < this.inputs_.IT_MAX_ && isNan(normalized_res) == false) {
             this.it_ += 1;
             time.start();
-
-            this.spatialDisc_.run();
 
             this.computeJacobian();
             
@@ -1277,7 +1277,7 @@ class temporalDiscretization {
             time.stop();
             const elapsed = time.elapsed() + this.t0_;
             writeln(" Time: ", elapsed, " It: ", this.it_,
-                    " res: ", res, " norm res: ", normalized_res,
+                    " res: ", res, " norm res: ", normalized_res, " kutta res: ", this.spatialDisc_.kutta_res_,
                     " res wall: ", res_wall, " res fluid: ", res_fluid, " res wake: ", res_wake,
                     " Cl: ", Cl, " Cd: ", Cd, " Cm: ", Cm, " Circulation: ", this.spatialDisc_.circulation_,
                     " GMRES its: ", its, " reason: ", reason, " omega: ", omega, " LS its: ", lineSearchIts);
