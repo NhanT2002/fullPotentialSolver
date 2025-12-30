@@ -721,6 +721,59 @@ class temporalDiscretization {
                     // No direct phi term for wall since phi_ghost = phi_int → delta_phi = 0
                     // No off-diagonal since ghost is not a real DOF
 
+                    // === DENSITY RETARDATION FOR WALL FACES ===
+                    // Wall flux = ρ_face * (V_int · m_wall) * A
+                    // In supersonic regions, ρ_face depends on upwind (interior) density:
+                    //   ρ_face = (1-μ) * ρ_isen + μ * ρ_upwind
+                    // where upwind = interior cell for wall faces.
+                    //
+                    // ∂F/∂φ includes: (V_int · m_wall) * ∂ρ_face/∂φ_int * A
+                    const uInt = this.spatialDisc_.uu_[elem];
+                    const vInt = this.spatialDisc_.vv_[elem];
+                    const vDotMwall = uInt * mWallX + vInt * mWallY;
+                    
+                    const mu_int = this.spatialDisc_.mumu_[elem];
+                    
+                    if mu_int > 0.0 {
+                        const gamma = this.inputs_.GAMMA_;
+                        const Minf2 = this.inputs_.MACH_ * this.inputs_.MACH_;
+                        const rhoInt = this.spatialDisc_.rhorho_[elem];
+                        const machInt = this.spatialDisc_.machmach_[elem];
+                        const velMag2 = uInt*uInt + vInt*vInt;
+                        const velMag = sqrt(velMag2);
+                        
+                        // ∂ρ_upwind/∂|V| = -ρ^(2-γ) * M∞² * |V|
+                        const drho_dVelMag = -rhoInt**(2.0-gamma) * Minf2 * velMag;
+                        
+                        // ∂|V|/∂φ_int = -sumW · (V/|V|)
+                        // For wall, gradient includes ghost contribution: use (-sumW + w_ghost)
+                        var dVelMag_dPhi_int = 0.0;
+                        if velMag > 1e-10 {
+                            const dux_dPhi = -sumWx_elem + wx_elemToNeighbor;
+                            const dvy_dPhi = -sumWy_elem + wy_elemToNeighbor;
+                            dVelMag_dPhi_int = (dux_dPhi * uInt + dvy_dPhi * vInt) / velMag;
+                        }
+                        
+                        // Get isentropic density at face
+                        const rhoIsen = if mu_int < 0.999 
+                                        then (rhoFace - mu_int * rhoInt) / (1.0 - mu_int)
+                                        else rhoInt;
+                        
+                        // Term 1: μ * ∂ρ_upwind/∂φ_int
+                        var drhoFace_dPhi_int = mu_int * drho_dVelMag * dVelMag_dPhi_int;
+                        
+                        // Term 2: (∂μ/∂φ_int) * (ρ_upwind - ρ_isen)
+                        if velMag > 1e-10 {
+                            const dmu_dVelMag = this.inputs_.MU_C_ * 2.0 * machInt * machInt / velMag;
+                            const dmu_dPhi_int = dmu_dVelMag * dVelMag_dPhi_int;
+                            drhoFace_dPhi_int += dmu_dPhi_int * (rhoInt - rhoIsen);
+                        }
+                        
+                        // Add contribution: (V_int · m_wall) * ∂ρ_face/∂φ_int * A
+                        const densityRetardation = vDotMwall * drhoFace_dPhi_int * area;
+                        diag += sign * densityRetardation;
+                    }
+
                     // === CIRCULATION (Γ) DERIVATIVE FOR WALL FACES ===
                     // Wall flux = V_int · m_wall * A, where V_int = ∇φ_int
                     // If the interior cell has wake-crossing faces, ∇φ_int depends on Γ

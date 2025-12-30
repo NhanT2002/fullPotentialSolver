@@ -31,6 +31,8 @@ class spatialDiscretization {
     var vv_: [elem_dom] real(64);
     var pp_: [elem_dom] real(64);
     var rhorho_: [elem_dom] real(64);
+    var gradRhoX_: [elem_dom] real(64);
+    var gradRhoY_: [elem_dom] real(64);
     var phi_: [elem_dom] real(64);
     var elemCentroidX_: [elem_dom] real(64);
     var elemCentroidY_: [elem_dom] real(64);
@@ -554,6 +556,9 @@ class spatialDiscretization {
             this.machmach_[ghostElem] = this.machmach_[interiorElem];
             this.mumu_[ghostElem] = this.mumu_[interiorElem];
         }
+
+        // Compute gradient of rho
+        this.lsGradQR_!.computeGradient(this.rhorho_, this.gradRhoX_, this.gradRhoY_);
     }
 
     proc computeFaceProperties() {
@@ -670,7 +675,11 @@ class spatialDiscretization {
             
             // Get isentropic and upwind densities
             const rhoIsentropic = this.rhoFace_[face];
-            const rhoUpwind = this.rhorho_[upwindElem];
+            const dx = this.elemCentroidX_[upwindElem] - this.faceCentroidX_[face];
+            const dy = this.elemCentroidY_[upwindElem] - this.faceCentroidY_[face];
+            const rhoUpwind = this.rhorho_[upwindElem] + 
+                                this.gradRhoX_[upwindElem] * dx + 
+                                this.gradRhoY_[upwindElem] * dy;
             
             // Blend: ρ_face = ρ_isen - μ * (ρ_isen - ρ_upwind)
             this.rhoFace_[face] = rhoIsentropic - mu * (rhoIsentropic - rhoUpwind);
@@ -805,6 +814,8 @@ class spatialDiscretization {
         var vv: [dom] real(64);
         var ww: [dom] real(64);
         var rhorho: [dom] real(64);
+        var gradRhoX: [dom] real(64);
+        var gradRhoY: [dom] real(64);
         var pp: [dom] real(64);
         var resres: [dom] real(64);
         var machmach: [dom] real(64);
@@ -817,6 +828,8 @@ class spatialDiscretization {
             uu[elem-1] = this.uu_[elem];
             vv[elem-1] = this.vv_[elem];
             rhorho[elem-1] = this.rhorho_[elem];
+            gradRhoX[elem-1] = this.gradRhoX_[elem];
+            gradRhoY[elem-1] = this.gradRhoY_[elem];
             pp[elem-1] = (this.rhorho_[elem]**this.inputs_.GAMMA_ / (this.inputs_.GAMMA_ * this.inputs_.MACH_ * this.inputs_.MACH_ * this.inputs_.P_INF_) - 1 ) / (this.inputs_.GAMMA_/2*this.inputs_.MACH_**2);
             resres[elem-1] = abs(this.res_[elem]);
             machmach[elem-1] = this.mach(this.uu_[elem], this.vv_[elem], this.rhorho_[elem]);
@@ -831,6 +844,8 @@ class spatialDiscretization {
         fields["VelocityY"] = vv;
         fields["VelocityZ"] = ww;
         fields["rho"] = rhorho;
+        fields["gradRhoX"] = gradRhoX;
+        fields["gradRhoY"] = gradRhoY;
         fields["cp"] = pp;
         fields["res"] = resres;
         fields["mach"] = machmach;
@@ -915,6 +930,8 @@ class spatialDiscretization {
         var vv: [dom] real(64);
         var ww: [dom] real(64);
         var rhorho: [dom] real(64);
+        var gradRhoX: [dom] real(64);
+        var gradRhoY: [dom] real(64);
         var pp: [dom] real(64);
         var resres: [dom] real(64);
         var machmach: [dom] real(64);
@@ -927,6 +944,8 @@ class spatialDiscretization {
             uu[elem-1] = this.uu_[elem];
             vv[elem-1] = this.vv_[elem];
             rhorho[elem-1] = this.rhorho_[elem];
+            gradRhoX[elem-1] = this.gradRhoX_[elem];
+            gradRhoY[elem-1] = this.gradRhoY_[elem];
             pp[elem-1] = (this.rhorho_[elem]**this.inputs_.GAMMA_ / (this.inputs_.GAMMA_ * this.inputs_.MACH_ * this.inputs_.MACH_ * this.inputs_.P_INF_) - 1 ) / (this.inputs_.GAMMA_/2*this.inputs_.MACH_**2);
             resres[elem-1] = abs(this.res_[elem]);
             machmach[elem-1] = this.mach(this.uu_[elem], this.vv_[elem], this.rhorho_[elem]);
@@ -941,6 +960,8 @@ class spatialDiscretization {
         fields["VelocityY"] = vv;
         fields["VelocityZ"] = ww;
         fields["rho"] = rhorho;
+        fields["gradRhoX"] = gradRhoX;
+        fields["gradRhoY"] = gradRhoY;
         fields["cp"] = pp;
         fields["res"] = resres;
         fields["mach"] = machmach;
