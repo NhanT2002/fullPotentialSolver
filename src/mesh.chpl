@@ -35,7 +35,6 @@ proc readSolution(filename) {
     const dsetIt = "/Base/GlobalConvergenceHistory/IterationCounters/ data";
     const dsetTime = "/Base/GlobalConvergenceHistory/Time/ data";
     const dsetRes = "/Base/GlobalConvergenceHistory/Residual/ data";
-    const dsetResPhi = "/Base/GlobalConvergenceHistory/ResPhi/ data";
     const dsetCl = "/Base/GlobalConvergenceHistory/Cl/ data";
     const dsetCd = "/Base/GlobalConvergenceHistory/Cd/ data";
     const dsetCm = "/Base/GlobalConvergenceHistory/Cm/ data";
@@ -52,14 +51,13 @@ proc readSolution(filename) {
     var it = read1DDataset(int, file_id, dsetIt);
     var time = read1DDataset(real(64), file_id, dsetTime);
     var res = read1DDataset(real(64), file_id, dsetRes);
-    var resPhi = read1DDataset(real(64), file_id, dsetResPhi);
     var cl = read1DDataset(real(64), file_id, dsetCl);
     var cd = read1DDataset(real(64), file_id, dsetCd);
     var cm = read1DDataset(real(64), file_id, dsetCm);
     var circulation = read1DDataset(real(64), file_id, dsetCirculation);
 
     H5Fclose(file_id);
-    return (xElem, yElem, rho, phi, it, time, res, resPhi, cl, cd, cm, circulation);
+    return (xElem, yElem, rho, phi, it, time, res, cl, cd, cm, circulation);
 }
 
 proc readMesh(filename: string, elementType: string) {

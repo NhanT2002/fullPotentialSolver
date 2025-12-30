@@ -146,6 +146,8 @@ class temporalDiscretization {
     var spatialDisc_: shared spatialDiscretization;
     var inputs_: potentialInputs;
     var it_: int = 0;
+    var t0_: real(64) = 0.0;
+    var first_res_: real(64) = 1e12;
     
     // Index for circulation DOF (last row/column) - must be before A_petsc for init order
     var gammaIndex_: int;
@@ -815,8 +817,8 @@ class temporalDiscretization {
         // === KUTTA CONDITION ROW ===
         // Γ - (φ_upper,TE - φ_lower,TE) = 0
         // Currently, circulation is computed as:
-        //   Γ = 0.5*(φ_upper1 + φ_upper2) + V_face·Δs - [0.5*(φ_lower1 + φ_lower2) + V_face·Δs]
-        // Simplified for linearization: Γ ≈ φ_upper1 - φ_lower1 (main cells)
+        //   Γ = φ_upper + V_upper·Δs - [φ_lower + V_lower·Δs]
+        // Simplified for linearization: Γ ≈ φ_upper - φ_lower (main cells)
         //
         // Kutta residual: R_Γ = Γ - (φ_upperTE - φ_lowerTE)
         // d(R_Γ)/dΓ = 1
@@ -977,6 +979,23 @@ class temporalDiscretization {
             }
             this.circulation_bar_ = this.spatialDisc_.circulation_;
         }
+
+        if this.inputs_.START_FILENAME_ != "" {
+            writeln("Initializing solution from file: ", this.inputs_.START_FILENAME_);
+            const (xElem, yElem, rho, phi, it, time, res, cl, cd, cm, circulation) = readSolution(this.inputs_.START_FILENAME_);
+            for i in it.domain {
+                this.timeList_.pushBack(time[i]);
+                this.itList_.pushBack(it[i]);
+                this.resList_.pushBack(res[i]);
+                this.clList_.pushBack(cl[i]);
+                this.cdList_.pushBack(cd[i]);
+                this.cmList_.pushBack(cm[i]);
+                this.circulationList_.pushBack(circulation[i]);
+            }
+            this.it_ = it.last;
+            this.t0_ = time.last;
+            this.first_res_ = res.first;
+        }
     }
 
     // Reset solver state for Mach continuation (keeps current solution as initial guess)
@@ -1003,7 +1022,6 @@ class temporalDiscretization {
 
     proc solve() {
         var normalized_res: real(64) = 1e12;
-        var first_res : real(64) = 1e12;
         var res : real(64) = 1e12;        // Current residual (absolute)
         var res_prev : real(64) = 1e12;  // Previous iteration residual for line search
         var omega : real(64) = this.inputs_.OMEGA_;  // Current relaxation factor
@@ -1015,11 +1033,11 @@ class temporalDiscretization {
         var phi_backup: [1..this.spatialDisc_.nelemDomain_] real(64);
         var circulation_backup: real(64);
         
-        // Compute initial residual to check if already converged (useful for Mach continuation)
-        this.spatialDisc_.run();
-        res = RMSE(this.spatialDisc_.res_, this.spatialDisc_.elemVolume_);
-        first_res = res;
-        normalized_res = 1.0;
+        // // Compute initial residual to check if already converged (useful for Mach continuation)
+        // this.spatialDisc_.run();
+        // res = RMSE(this.spatialDisc_.res_, this.spatialDisc_.elemVolume_);
+        // this.first_res_ = res;
+        // normalized_res = 1.0;
         // Convergence check: either relative tolerance OR absolute tolerance
         // The absolute tolerance is important for Mach continuation where the 
         // initial residual may already be very small
@@ -1110,8 +1128,8 @@ class temporalDiscretization {
                 }
                 circulation_backup = this.spatialDisc_.circulation_;
                 
-                const MAX_LINE_SEARCH = 5;
-                const SUFFICIENT_DECREASE = 1.2;  // Allow up to 20% increase (inexact Newton)
+                const MAX_LINE_SEARCH = this.inputs_.MAX_LINE_SEARCH_;
+                const SUFFICIENT_DECREASE = this.inputs_.SUFFICIENT_DECREASE_;  // Allow up to 20% increase (inexact Newton)
                 var accepted = false;
                 
                 while !accepted && lineSearchIts < MAX_LINE_SEARCH {
@@ -1151,27 +1169,6 @@ class temporalDiscretization {
             }
 
             // === SELECTIVE FREQUENCY DAMPING (SFD) ===
-            // Jordi et al. 2014 encapsulated formulation (Physics of Fluids 26, 034101)
-            // 
-            // The SFD method is applied using a splitting approach where the solver
-            // output is treated as Φ(q^n) and then the exact solution of the linear
-            // SFD system is applied via matrix exponential:
-            //
-            //   [q^{n+1}  ]       [Φ(q^n)]
-            //   [         ] = e^{LΔt} [      ]
-            //   [q̄^{n+1}]       [q̄^n  ]
-            //
-            // where the matrix exponential e^{LΔt} from Eq. (9) is:
-            //
-            //   e^{LΔt} = 1/(1+χΔ) * [1 + χΔ·E      χΔ(1-E)  ]
-            //                        [1 - E        χΔ + E   ]
-            //
-            // with E = exp(-(χ + 1/Δ)·Δt) and Δt = 1 (one iteration = one time unit)
-            //
-            // Parameters:
-            //   χ (SFD_CHI): control coefficient, strength of feedback damping
-            //   Δ (SFD_DELTA): filter width, related to cutoff frequency
-            //
             if this.inputs_.SFD_ENABLED_ {
                 const chi = this.inputs_.SFD_CHI_;
                 const delta = this.inputs_.SFD_DELTA_;
@@ -1215,9 +1212,9 @@ class temporalDiscretization {
             res_prev = res;
             
             if this.it_ == 1 {
-                first_res = res;
+                this.first_res_ = res;
             }
-            normalized_res = res / first_res;
+            normalized_res = res / this.first_res_;
 
             const res_wall = RMSE(this.spatialDisc_.res_[this.spatialDisc_.wall_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.wall_dom]);
             const res_fluid = RMSE(this.spatialDisc_.res_[this.spatialDisc_.fluid_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.fluid_dom]);
@@ -1225,7 +1222,7 @@ class temporalDiscretization {
 
             const (Cl, Cd, Cm) = this.spatialDisc_.computeAerodynamicCoefficients();
             time.stop();
-            const elapsed = time.elapsed();
+            const elapsed = time.elapsed() + this.t0_;
             writeln(" Time: ", elapsed, " It: ", this.it_,
                     " res: ", res, " norm res: ", normalized_res,
                     " res wall: ", res_wall, " res fluid: ", res_fluid, " res wake: ", res_wake,

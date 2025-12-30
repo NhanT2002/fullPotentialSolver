@@ -360,14 +360,30 @@ class spatialDiscretization {
     }
 
     proc initializeSolution() {
-        forall elem in 1..this.nelem_ {
-            this.uu_[elem] = this.inputs_.U_INF_;
-            this.vv_[elem] = this.inputs_.V_INF_;
-            this.rhorho_[elem] = this.inputs_.RHO_INF_;
-            this.pp_[elem] = this.inputs_.P_INF_;
+        if this.inputs_.START_FILENAME_ != "" {
+            writeln("Initializing solution from file: ", this.inputs_.START_FILENAME_);
+            const (xElem, yElem, rho, phi, it, time, res, cl, cd, cm, circulation) = readSolution(this.inputs_.START_FILENAME_);
+            if phi.size != this.nelemDomain_ {
+                halt("Error: START_FILENAME mesh size does not match current mesh size.");
+            }
+            else {
+                forall elem in 1..this.nelem_ {
+                    this.phi_[elem] = phi[elem];
+                    this.rhorho_[elem] = rho[elem];
+                }
+                this.circulation_ = circulation.last;
+            }
+        }
+        else {
+            forall elem in 1..this.nelem_ {
+                this.uu_[elem] = this.inputs_.U_INF_;
+                this.vv_[elem] = this.inputs_.V_INF_;
+                this.rhorho_[elem] = this.inputs_.RHO_INF_;
+                this.pp_[elem] = this.inputs_.P_INF_;
 
-            this.phi_[elem] = this.inputs_.U_INF_ * this.elemCentroidX_[elem] +
-                              this.inputs_.V_INF_ * this.elemCentroidY_[elem];
+                this.phi_[elem] = this.inputs_.U_INF_ * this.elemCentroidX_[elem] +
+                                this.inputs_.V_INF_ * this.elemCentroidY_[elem];
+            }
         }
     }
 
