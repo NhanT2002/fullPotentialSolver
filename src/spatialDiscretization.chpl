@@ -352,11 +352,11 @@ class spatialDiscretization {
 
         
 
-        this.deltaSupperTEx_ = this.TEnodeXcoord_ - this.faceCentroidX_[this.upperTEface_];
-        this.deltaSupperTEy_ = this.TEnodeYcoord_ - this.faceCentroidY_[this.upperTEface_];
+        this.deltaSupperTEx_ = this.TEnodeXcoord_ - this.elemCentroidX_[this.upperTEelem_];
+        this.deltaSupperTEy_ = this.TEnodeYcoord_ - this.elemCentroidY_[this.upperTEelem_];
 
-        this.deltaSlowerTEx_ = this.TEnodeXcoord_ - this.faceCentroidX_[this.lowerTEface_];
-        this.deltaSlowerTEy_ = this.TEnodeYcoord_ - this.faceCentroidY_[this.lowerTEface_];
+        this.deltaSlowerTEx_ = this.TEnodeXcoord_ - this.elemCentroidX_[this.lowerTEelem_];
+        this.deltaSlowerTEy_ = this.TEnodeYcoord_ - this.elemCentroidY_[this.lowerTEelem_];
     }
 
     proc initializeSolution() {
@@ -700,10 +700,9 @@ class spatialDiscretization {
         // Kutta condition residual: R_Γ = Γ - Γ_computed
         // We want Γ to equal the computed value from the potential field
         // R_Γ = Γ_current - (φ_upper - φ_lower) should go to zero
-        const upperTEelem2 = this.mesh_.edge2elem_[2, this.upperTEface_];
-        const lowerTEelem2 = this.mesh_.edge2elem_[2, this.lowerTEface_];
-        const phi_upper = 0.5 * (this.phi_[this.upperTEelem_] + this.phi_[upperTEelem2]);
-        const phi_lower = 0.5 * (this.phi_[this.lowerTEelem_] + this.phi_[lowerTEelem2]);
+        // Extrapolated phi at upper and lower TE elem
+        const phi_upper = this.phi_[this.upperTEelem_] + (this.uu_[this.upperTEelem_] * this.deltaSupperTEx_ + this.vv_[this.upperTEelem_] * this.deltaSupperTEy_);
+        const phi_lower = this.phi_[this.lowerTEelem_] + (this.uu_[this.lowerTEelem_] * this.deltaSlowerTEx_ + this.vv_[this.lowerTEelem_] * this.deltaSlowerTEy_);
         const gamma_computed = phi_upper - phi_lower;
         this.kutta_res_ = this.circulation_ - gamma_computed;
     }

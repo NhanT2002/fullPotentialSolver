@@ -495,4 +495,406 @@ class LeastSquaresGradientQR {
     }
 }
 
+/*
+ * Pseudo-Laplacian Operator (Blazek formulation)
+ * 
+ * This class implements the pseudo-Laplacian operator for artificial dissipation
+ * on unstructured meshes, as described in:
+ *   Blazek, "Computational Fluid Dynamics: Principles and Applications"
+ *   Section 5.3.1 (Eqs. 5.24-5.30)
+ *
+ * The pseudo-Laplacian is defined as (Eq. 5.24):
+ *   L(U_I) = Σ_J θ_IJ * (U_J - U_I)
+ *
+ * where θ_IJ are distance-weighted geometric weights that ensure the
+ * pseudo-Laplacian vanishes for a linearly varying function on any grid.
+ *
+ * The weights are computed as (Eqs. 5.25-5.26):
+ *   θ_IJ = 1 + θ'_IJ
+ *   θ'_IJ = λ_x * (x_J - x_I) + λ_y * (y_J - y_I)
+ *
+ * The Lagrange multipliers λ are computed for each cell from the first-order
+ * and second-order moments of the cell's neighbors (Eqs. 5.27-5.30).
+ *
+ * For 2D, the system simplifies to:
+ *   |I_xx  I_xy| |λ_x|   |R_x|
+ *   |I_xy  I_yy| |λ_y| = |R_y|
+ *
+ * Applications:
+ * - Second-order artificial dissipation: k^(2) * Σ θ_IJ * (W_J - W_I)
+ * - Fourth-order artificial dissipation: L(L(W)) (Laplacian of Laplacian)
+ * - JST (Jameson-Schmidt-Turkel) scheme stabilization
+ */
+class PseudoLaplacian {
+    var mesh_: shared MeshData;
+    var nelemDomain_: int;
+    var nface_: int;
+
+    // Per-cell Lagrange multipliers
+    var elem_dom: domain(1) = {1..0};
+    var lambdaX_: [elem_dom] real(64);
+    var lambdaY_: [elem_dom] real(64);
+
+    // Precomputed weights per face (for both elem1 and elem2 perspectives)
+    // theta1_[face] = weight when computing L(U) for elem1
+    // theta2_[face] = weight when computing L(U) for elem2
+    var face_dom: domain(1) = {1..0};
+    var theta1_: [face_dom] real(64);
+    var theta2_: [face_dom] real(64);
+
+    // Sum of weights per cell (for efficient computation)
+    var sumTheta_: [elem_dom] real(64);
+
+    /*
+     * Initialize the pseudo-Laplacian operator
+     */
+    proc init(Mesh: shared MeshData) {
+        this.mesh_ = Mesh;
+        this.nelemDomain_ = Mesh.nelem_;
+        this.nface_ = Mesh.nedge_;
+        this.elem_dom = {1..this.nelemDomain_};
+        this.face_dom = {1..this.nface_};
+    }
+
+    /*
+     * Precompute Lagrange multipliers and weights
+     * Call this once after mesh metrics are initialized
+     *
+     * Following Blazek Eqs. (5.27)-(5.30) for 2D
+     */
+    proc precompute(const ref elemCentroidX: [] real(64),
+                    const ref elemCentroidY: [] real(64)) {
+        
+        // Phase 1: Compute Lagrange multipliers for each cell
+        forall elem in 1..this.nelemDomain_ {
+            const faces = this.mesh_.elem2edge_[this.mesh_.elem2edgeIndex_[elem] + 1 ..
+                                                 this.mesh_.elem2edgeIndex_[elem + 1]];
+
+            const cx = elemCentroidX[elem];
+            const cy = elemCentroidY[elem];
+
+            // First-order moments (Eq. 5.29)
+            var Rx = 0.0, Ry = 0.0;
+
+            // Second-order moments (Eq. 5.30)
+            var Ixx = 0.0, Iyy = 0.0, Ixy = 0.0;
+
+            for face in faces {
+                const elem1 = this.mesh_.edge2elem_[1, face];
+                const elem2 = this.mesh_.edge2elem_[2, face];
+                const neighbor = if elem1 == elem then elem2 else elem1;
+
+                const dx = elemCentroidX[neighbor] - cx;
+                const dy = elemCentroidY[neighbor] - cy;
+
+                // First-order moments
+                Rx += dx;
+                Ry += dy;
+
+                // Second-order moments
+                Ixx += dx * dx;
+                Iyy += dy * dy;
+                Ixy += dx * dy;
+            }
+
+            // Solve 2x2 system for Lagrange multipliers (Eq. 5.27 simplified for 2D)
+            // For linear exactness, we need:
+            //   Σ θ_IJ (x_J - x_I) = 0  and  Σ θ_IJ (y_J - y_I) = 0
+            // Substituting θ_IJ = 1 + λ_x·Δx + λ_y·Δy and expanding:
+            //   R_x + λ_x·I_xx + λ_y·I_xy = 0
+            //   R_y + λ_x·I_xy + λ_y·I_yy = 0
+            // Therefore:
+            //   |Ixx  Ixy| |λx|   |-Rx|
+            //   |Ixy  Iyy| |λy| = |-Ry|
+            //
+            // Using Cramer's rule:
+            // det = Ixx*Iyy - Ixy^2
+            // λx = (-Rx*Iyy + Ry*Ixy) / det
+            // λy = (-Ry*Ixx + Rx*Ixy) / det
+
+            const det = Ixx * Iyy - Ixy * Ixy;
+
+            if abs(det) > 1e-30 {
+                const invDet = 1.0 / det;
+                this.lambdaX_[elem] = (-Rx * Iyy + Ry * Ixy) * invDet;
+                this.lambdaY_[elem] = (-Ry * Ixx + Rx * Ixy) * invDet;
+            } else {
+                // Degenerate case (shouldn't happen for valid meshes)
+                this.lambdaX_[elem] = 0.0;
+                this.lambdaY_[elem] = 0.0;
+            }
+        }
+
+        // Phase 2: Compute and store weights per face for both perspectives
+        forall face in this.face_dom {
+            const elem1 = this.mesh_.edge2elem_[1, face];
+            const elem2 = this.mesh_.edge2elem_[2, face];
+
+            // Displacement from elem1 to elem2
+            const dx12 = elemCentroidX[elem2] - elemCentroidX[elem1];
+            const dy12 = elemCentroidY[elem2] - elemCentroidY[elem1];
+
+            // Weight for elem1's pseudo-Laplacian (neighbor is elem2)
+            // θ_IJ = 1 + λ_x,I * dx + λ_y,I * dy (Eqs. 5.25-5.26)
+            if elem1 <= this.nelemDomain_ {
+                const thetaPrime = this.lambdaX_[elem1] * dx12 + this.lambdaY_[elem1] * dy12;
+                // Clip to [0, 2] for stability on distorted grids (Blazek recommendation)
+                this.theta1_[face] = max(0.0, min(2.0, 1.0 + thetaPrime));
+            } else {
+                this.theta1_[face] = 1.0;  // Ghost cell: use uniform weight
+            }
+
+            // Weight for elem2's pseudo-Laplacian (neighbor is elem1)
+            // Note: displacement is -dx12, -dy12 from elem2's perspective
+            if elem2 <= this.nelemDomain_ {
+                const thetaPrime = this.lambdaX_[elem2] * (-dx12) + this.lambdaY_[elem2] * (-dy12);
+                // Clip to [0, 2] for stability
+                this.theta2_[face] = max(0.0, min(2.0, 1.0 + thetaPrime));
+            } else {
+                this.theta2_[face] = 1.0;  // Ghost cell: use uniform weight
+            }
+        }
+
+        // Phase 3: Compute sum of weights per cell (for Laplacian of Laplacian)
+        forall elem in 1..this.nelemDomain_ {
+            const faces = this.mesh_.elem2edge_[this.mesh_.elem2edgeIndex_[elem] + 1 ..
+                                                 this.mesh_.elem2edgeIndex_[elem + 1]];
+            var sumT = 0.0;
+            for face in faces {
+                const elem1 = this.mesh_.edge2elem_[1, face];
+                if elem == elem1 {
+                    sumT += this.theta1_[face];
+                } else {
+                    sumT += this.theta2_[face];
+                }
+            }
+            this.sumTheta_[elem] = sumT;
+        }
+    }
+
+    /*
+     * Compute the pseudo-Laplacian of a scalar field: L(U)
+     * 
+     * L(U_I) = Σ_J θ_IJ * (U_J - U_I)
+     */
+    proc apply(const ref U: [] real(64),
+               ref LU: [] real(64)) {
+
+        forall elem in 1..this.nelemDomain_ {
+            const faces = this.mesh_.elem2edge_[this.mesh_.elem2edgeIndex_[elem] + 1 ..
+                                                 this.mesh_.elem2edgeIndex_[elem + 1]];
+
+            const UI = U[elem];
+            var sum = 0.0;
+
+            for face in faces {
+                const elem1 = this.mesh_.edge2elem_[1, face];
+                const elem2 = this.mesh_.edge2elem_[2, face];
+                const neighbor = if elem1 == elem then elem2 else elem1;
+
+                // Get the correct weight for this perspective
+                const theta = if elem == elem1 then this.theta1_[face] else this.theta2_[face];
+
+                sum += theta * (U[neighbor] - UI);
+            }
+
+            LU[elem] = sum;
+        }
+    }
+
+    /*
+     * Compute the Laplacian of Laplacian: L(L(U)) for fourth-order dissipation
+     *
+     * This is done in two passes:
+     * 1. Compute L(U) for all cells
+     * 2. Compute L(L(U)) using the result
+     *
+     * The temp array is provided externally to avoid allocation overhead
+     */
+    proc applyLaplacianOfLaplacian(const ref U: [] real(64),
+                                    ref LLU: [] real(64),
+                                    ref temp: [] real(64)) {
+        // First pass: L(U)
+        this.apply(U, temp);
+
+        // Second pass: L(L(U))
+        this.apply(temp, LLU);
+    }
+
+    /*
+     * Compute second-order artificial dissipation term (scaled by spectral radius)
+     *
+     * D^(2)_I = Σ_J (λ_c)_IJ * ε^(2)_IJ * θ_IJ * (W_J - W_I)
+     *
+     * where (λ_c)_IJ is the spectral radius and ε^(2)_IJ is the shock sensor
+     */
+    proc computeSecondOrderDissipation(const ref U: [] real(64),
+                                        const ref spectralRadius: [] real(64),
+                                        const ref epsilon2: [] real(64),
+                                        ref D2: [] real(64)) {
+
+        forall elem in 1..this.nelemDomain_ {
+            const faces = this.mesh_.elem2edge_[this.mesh_.elem2edgeIndex_[elem] + 1 ..
+                                                 this.mesh_.elem2edgeIndex_[elem + 1]];
+
+            const UI = U[elem];
+            var sum = 0.0;
+
+            for face in faces {
+                const elem1 = this.mesh_.edge2elem_[1, face];
+                const elem2 = this.mesh_.edge2elem_[2, face];
+                const neighbor = if elem1 == elem then elem2 else elem1;
+
+                // Spectral radius at face: average of cell values
+                const lambdaC = 0.5 * (spectralRadius[elem] + spectralRadius[neighbor]);
+
+                // Shock sensor: max of adjacent cells
+                const eps2 = max(epsilon2[elem], epsilon2[neighbor]);
+
+                // Weight for this perspective
+                const theta = if elem == elem1 then this.theta1_[face] else this.theta2_[face];
+
+                sum += lambdaC * eps2 * theta * (U[neighbor] - UI);
+            }
+
+            D2[elem] = sum;
+        }
+    }
+
+    /*
+     * Compute fourth-order artificial dissipation term
+     *
+     * D^(4)_I = -Σ_J (λ_c)_IJ * ε^(4)_IJ * θ_IJ * (L(W_J) - L(W_I))
+     *
+     * Requires pre-computed L(U) passed as LU
+     */
+    proc computeFourthOrderDissipation(const ref U: [] real(64),
+                                        const ref LU: [] real(64),
+                                        const ref spectralRadius: [] real(64),
+                                        const ref epsilon4: [] real(64),
+                                        ref D4: [] real(64)) {
+
+        forall elem in 1..this.nelemDomain_ {
+            const faces = this.mesh_.elem2edge_[this.mesh_.elem2edgeIndex_[elem] + 1 ..
+                                                 this.mesh_.elem2edgeIndex_[elem + 1]];
+
+            var sum = 0.0;
+
+            for face in faces {
+                const elem1 = this.mesh_.edge2elem_[1, face];
+                const elem2 = this.mesh_.edge2elem_[2, face];
+                const neighbor = if elem1 == elem then elem2 else elem1;
+
+                // Spectral radius at face
+                const lambdaC = 0.5 * (spectralRadius[elem] + spectralRadius[neighbor]);
+
+                // Fourth-order coefficient
+                const eps4 = max(0.0, epsilon4[elem] - epsilon4[neighbor]);
+
+                // Weight for this perspective
+                const theta = if elem == elem1 then this.theta1_[face] else this.theta2_[face];
+
+                sum += lambdaC * eps4 * theta * (LU[neighbor] - LU[elem]);
+            }
+
+            D4[elem] = -sum;  // Note the negative sign
+        }
+    }
+
+    /*
+     * Compute combined JST artificial dissipation (second + fourth order)
+     *
+     * D_I = Σ_J (λ_c)_IJ * θ_IJ * [ε^(2)_IJ * (W_J - W_I) - ε^(4)_IJ * (L(W_J) - L(W_I))]
+     *
+     * Parameters:
+     *   k2: second-order coefficient (typically 0.5)
+     *   k4: fourth-order coefficient (typically 1/64 to 1/128)
+     */
+    proc computeJSTDissipation(const ref U: [] real(64),
+                                const ref spectralRadius: [] real(64),
+                                const ref pressureSensor: [] real(64),
+                                const k2: real(64),
+                                const k4: real(64),
+                                ref D: [] real(64),
+                                ref tempLU: [] real(64)) {
+
+        // First compute L(U) for fourth-order term
+        this.apply(U, tempLU);
+
+        forall elem in 1..this.nelemDomain_ {
+            const faces = this.mesh_.elem2edge_[this.mesh_.elem2edgeIndex_[elem] + 1 ..
+                                                 this.mesh_.elem2edgeIndex_[elem + 1]];
+
+            const UI = U[elem];
+            const LUI = tempLU[elem];
+            var sum = 0.0;
+
+            for face in faces {
+                const elem1 = this.mesh_.edge2elem_[1, face];
+                const elem2 = this.mesh_.edge2elem_[2, face];
+                const neighbor = if elem1 == elem then elem2 else elem1;
+
+                // Spectral radius at face
+                const lambdaC = 0.5 * (spectralRadius[elem] + spectralRadius[neighbor]);
+
+                // Pressure sensor (Eq. 5.36): Υ = max of adjacent cells
+                const upsilon = max(pressureSensor[elem], pressureSensor[neighbor]);
+
+                // Coefficients (Eq. 5.35)
+                const eps2 = k2 * upsilon;
+                const eps4 = max(0.0, k4 - eps2);
+
+                // Weight for this perspective
+                const theta = if elem == elem1 then this.theta1_[face] else this.theta2_[face];
+
+                // Combined dissipation
+                sum += lambdaC * theta * (eps2 * (U[neighbor] - UI) 
+                                         - eps4 * (tempLU[neighbor] - LUI));
+            }
+
+            D[elem] = sum;
+        }
+    }
+
+    /*
+     * Compute pressure sensor for JST scheme (Eq. 5.36)
+     *
+     * Υ_I = |Σ_J θ_IJ * (p_J - p_I)| / Σ_J (p_J + p_I)
+     *
+     * The sensor detects shocks based on second derivative of pressure
+     */
+    proc computePressureSensor(const ref pressure: [] real(64),
+                                ref sensor: [] real(64)) {
+
+        forall elem in 1..this.nelemDomain_ {
+            const faces = this.mesh_.elem2edge_[this.mesh_.elem2edgeIndex_[elem] + 1 ..
+                                                 this.mesh_.elem2edgeIndex_[elem + 1]];
+
+            const pI = pressure[elem];
+            var numerator = 0.0;
+            var denominator = 0.0;
+
+            for face in faces {
+                const elem1 = this.mesh_.edge2elem_[1, face];
+                const elem2 = this.mesh_.edge2elem_[2, face];
+                const neighbor = if elem1 == elem then elem2 else elem1;
+
+                const pJ = pressure[neighbor];
+
+                // Weight for this perspective
+                const theta = if elem == elem1 then this.theta1_[face] else this.theta2_[face];
+
+                numerator += theta * (pJ - pI);
+                denominator += pJ + pI;
+            }
+
+            if abs(denominator) > 1e-30 {
+                sensor[elem] = abs(numerator) / denominator;
+            } else {
+                sensor[elem] = 0.0;
+            }
+        }
+    }
+}
+
 }

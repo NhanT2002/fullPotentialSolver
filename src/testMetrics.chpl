@@ -5,6 +5,7 @@ module testMetrics {
     use mesh;
     import input.potentialInputs;
     use linearAlgebra;
+    use leastSquaresGradient;
 
     // ============== METRIC VERIFICATION TESTS ==============
 
@@ -16,6 +17,9 @@ module testMetrics {
         spatialDisc.initializeMetrics();
         spatialDisc.initializeSolution();
         verifyMetrics(spatialDisc);
+
+        // Test Pseudo-Laplacian operator (run early before potential PETSc issues)
+        testPseudoLaplacian(spatialDisc);
 
         // 1) Residual from the initialized (freestream) velocity field.
         // This should be ~0 (roundoff) because div(U_inf) = 0 and each control volume is closed.
@@ -77,7 +81,7 @@ module testMetrics {
             writeln("[Least-Squares QR] residual: RMSE=", res, " max=", resMax);
         }
 
-        spatialDisc.writeSolution();
+        // spatialDisc.writeSolution();
     }
     
     proc verifyMetrics(ref disc: spatialDiscretization): bool {
@@ -344,5 +348,259 @@ module testMetrics {
                 totalBoundaryFaces, " boundary faces, max distance error: ", maxDistErr,
                 if failCount > 0 then " (" + failCount:string + " failures)" else "");
         return passed;
+    }
+
+    // ============== PSEUDO-LAPLACIAN VERIFICATION TESTS ==============
+    
+    /*
+     * Test the pseudo-Laplacian operator with manufactured solutions.
+     * 
+     * According to Blazek, the pseudo-Laplacian should:
+     * 1. Vanish for linearly varying functions (this is the key property)
+     * 2. Produce meaningful (non-zero) results for quadratic functions
+     *
+     * We test with:
+     * - Linear: U = a*x + b*y + c  → L(U) should be ≈ 0
+     * - Quadratic: U = x² + y²    → L(U) should be non-zero (proportional to Laplacian = 4)
+     */
+    proc testPseudoLaplacian(ref disc: spatialDiscretization): bool {
+        writeln("\n=== Testing Pseudo-Laplacian Operator ===");
+        
+        var allPassed = true;
+        
+        // Create and initialize the pseudo-Laplacian operator
+        var pseudoLap = new owned PseudoLaplacian(disc.mesh_);
+        pseudoLap.precompute(disc.elemCentroidX_, disc.elemCentroidY_);
+        
+        const nelemDomain = disc.nelemDomain_;
+        const nelemTotal = disc.nelem_;  // Includes ghost cells
+        const elemDom = {1..nelemDomain};
+        const elemDomWithGhost = {1..nelemTotal};
+        
+        // Allocate arrays for testing (including ghost cells!)
+        var U: [elemDomWithGhost] real(64);
+        var LU: [elemDom] real(64);
+
+        // Helper to set U for all cells (including ghost) with a linear function
+        proc setLinearField(a: real(64), b: real(64), c: real(64)) {
+            forall elem in elemDomWithGhost {
+                U[elem] = a * disc.elemCentroidX_[elem] + b * disc.elemCentroidY_[elem] + c;
+            }
+        }
+
+        // Helper to set U for all cells with a quadratic function
+        proc setQuadraticField() {
+            forall elem in elemDomWithGhost {
+                const x = disc.elemCentroidX_[elem];
+                const y = disc.elemCentroidY_[elem];
+                U[elem] = x * x + y * y;
+            }
+        }
+        
+        // =============================================
+        // Test 1: Linear function U = 2x + 3y + 5
+        // L(U) should vanish for any mesh
+        // =============================================
+        const a = 2.0, b = 3.0, c = 5.0;
+        
+        setLinearField(a, b, c);
+        
+        pseudoLap.apply(U, LU);
+        
+        const maxLinear = max reduce abs(LU);
+        const l2Linear = sqrt((+ reduce (LU * LU)) / nelemDomain : real(64));
+        
+        // Should be essentially zero (machine precision scaled by problem size)
+        const linearTol = 1e-10;
+        const linearPassed = (maxLinear < linearTol);
+        
+        writeln("[", if linearPassed then "PASS" else "FAIL", 
+                "] Linear function U = ", a, "*x + ", b, "*y + ", c);
+        writeln("    L(U) max: ", maxLinear, ", L2: ", l2Linear, 
+                " (expected: ≈ 0, tol: ", linearTol, ")");
+        
+        if !linearPassed then allPassed = false;
+        
+        // =============================================
+        // Test 2: Constant function U = 7
+        // L(U) should also vanish
+        // =============================================
+        const constVal = 7.0;
+        
+        setLinearField(0.0, 0.0, constVal);
+        
+        pseudoLap.apply(U, LU);
+        
+        const maxConst = max reduce abs(LU);
+        const l2Const = sqrt((+ reduce (LU * LU)) / nelemDomain : real(64));
+        
+        const constPassed = (maxConst < linearTol);
+        
+        writeln("[", if constPassed then "PASS" else "FAIL", 
+                "] Constant function U = ", constVal);
+        writeln("    L(U) max: ", maxConst, ", L2: ", l2Const, 
+                " (expected: ≈ 0, tol: ", linearTol, ")");
+        
+        if !constPassed then allPassed = false;
+        
+        // =============================================
+        // Test 3: Quadratic function U = x² + y²
+        // True Laplacian = 4, pseudo-Laplacian should be O(1) and positive
+        // =============================================
+        setQuadraticField();
+        
+        pseudoLap.apply(U, LU);
+        
+        const meanQuad = (+ reduce LU) / nelemDomain : real(64);
+        const maxQuad = max reduce abs(LU);
+        const minQuad = min reduce LU;
+        
+        // The pseudo-Laplacian should be positive and roughly proportional to true Laplacian
+        // For U = x² + y², the true Laplacian is ∂²U/∂x² + ∂²U/∂y² = 2 + 2 = 4
+        // The pseudo-Laplacian is a scaled discrete approximation
+        const quadPassed = (meanQuad > 0.0);  // Should be positive
+        
+        writeln("[", if quadPassed then "PASS" else "FAIL", 
+                "] Quadratic function U = x² + y²");
+        writeln("    L(U) mean: ", meanQuad, ", min: ", minQuad, ", max: ", maxQuad);
+        writeln("    (expected: positive, proportional to true Laplacian = 4)");
+        
+        if !quadPassed then allPassed = false;
+        
+        // =============================================
+        // Test 4: Another linear function (just x-component)
+        // U = x, L(U) should vanish
+        // =============================================
+        setLinearField(1.0, 0.0, 0.0);
+        
+        pseudoLap.apply(U, LU);
+        
+        const maxLinearX = max reduce abs(LU);
+        const linearXPassed = (maxLinearX < linearTol);
+        
+        writeln("[", if linearXPassed then "PASS" else "FAIL", 
+                "] Linear function U = x");
+        writeln("    L(U) max: ", maxLinearX, " (expected: ≈ 0, tol: ", linearTol, ")");
+        
+        if !linearXPassed then allPassed = false;
+        
+        // =============================================
+        // Test 5a: L(L(U)) for linear function should vanish
+        // Since L(linear) ≈ 0, then L(L(linear)) ≈ 0
+        // =============================================
+        setLinearField(2.0, 3.0, 5.0);
+        
+        var LLU: [elemDom] real(64);
+        var tempLU: [elemDomWithGhost] real(64);
+        
+        // First pass: L(U)
+        pseudoLap.apply(U, tempLU[elemDom]);
+        
+        // Set ghost cell values for second pass
+        forall elem in (nelemDomain+1)..nelemTotal {
+            tempLU[elem] = 0.0;  // L(linear) ≈ 0
+        }
+        
+        // Second pass: L(L(U))
+        pseudoLap.apply(tempLU, LLU);
+        
+        const maxLLLinear = max reduce abs(LLU);
+        const llLinearPassed = (maxLLLinear < 1e-8);  // Slightly relaxed due to cascading errors
+        
+        writeln("[", if llLinearPassed then "PASS" else "FAIL", 
+                "] L(L(U)) for linear U = 2x + 3y + 5");
+        writeln("    L(L(U)) max: ", maxLLLinear, " (expected: ≈ 0)");
+        
+        if !llLinearPassed then allPassed = false;
+        
+        // =============================================
+        // Test 5b: L(L(U)) for quadratic function
+        // For U = x² + y², L(U) ≈ constant (≈ 4), so L(L(U)) ≈ L(constant) ≈ 0
+        // =============================================
+        setQuadraticField();
+        
+        // First pass: L(U)
+        pseudoLap.apply(U, tempLU[elemDom]);
+        
+        // For second pass, set ghost cell values to average of interior
+        const avgLU_quad = (+ reduce tempLU[elemDom]) / nelemDomain : real(64);
+        forall elem in (nelemDomain+1)..nelemTotal {
+            tempLU[elem] = avgLU_quad;
+        }
+        
+        // Second pass: L(L(U))
+        pseudoLap.apply(tempLU, LLU);
+        
+        const meanLLQuad = (+ reduce LLU) / nelemDomain : real(64);
+        const maxLLQuad = max reduce abs(LLU);
+        const l2LLQuad = sqrt((+ reduce (LLU * LLU)) / nelemDomain : real(64));
+        
+        // L(L(quadratic)) should be smaller than L(quadratic) since L(U) is more uniform
+        const llQuadSmaller = (l2LLQuad < meanQuad);  // L(L(U)) L2 norm < L(U) mean
+        
+        writeln("[", if llQuadSmaller then "PASS" else "FAIL", 
+                "] L(L(U)) for quadratic U = x² + y²");
+        writeln("    L(L(U)) mean: ", meanLLQuad, ", L2: ", l2LLQuad, ", max: ", maxLLQuad);
+        writeln("    (expected: L2 of L(L(U)) < mean of L(U) = ", meanQuad, ")");
+        
+        if !llQuadSmaller then allPassed = false;
+        
+        // =============================================
+        // Test 5c: L(L(U)) consistency check
+        // Verify that L(L(constant)) = 0 (since L(constant) = 0)
+        // This is the key property for 4th-order dissipation
+        // =============================================
+        // Set U to constant
+        forall elem in elemDomWithGhost {
+            U[elem] = 42.0;
+        }
+        
+        // First pass: L(constant) should be 0
+        pseudoLap.apply(U, tempLU[elemDom]);
+        forall elem in (nelemDomain+1)..nelemTotal {
+            tempLU[elem] = 0.0;
+        }
+        
+        // Second pass: L(L(constant)) = L(0) = 0
+        pseudoLap.apply(tempLU, LLU);
+        
+        const maxLLConst = max reduce abs(LLU);
+        const llConstPassed = (maxLLConst < 1e-10);
+        
+        writeln("[", if llConstPassed then "PASS" else "FAIL", 
+                "] L(L(U)) for constant U = 42");
+        writeln("    L(L(U)) max: ", maxLLConst, " (expected: 0)");
+        
+        if !llConstPassed then allPassed = false;
+        
+        // =============================================
+        // Test 6: Verify weights are in valid range [0, 2]
+        // =============================================
+        var minTheta1 = min reduce pseudoLap.theta1_;
+        var maxTheta1 = max reduce pseudoLap.theta1_;
+        var minTheta2 = min reduce pseudoLap.theta2_;
+        var maxTheta2 = max reduce pseudoLap.theta2_;
+        
+        const weightsValid = (minTheta1 >= 0.0 && maxTheta1 <= 2.0 && 
+                              minTheta2 >= 0.0 && maxTheta2 <= 2.0);
+        
+        writeln("[", if weightsValid then "PASS" else "FAIL", 
+                "] Weight bounds check");
+        writeln("    theta1 range: [", minTheta1, ", ", maxTheta1, "]");
+        writeln("    theta2 range: [", minTheta2, ", ", maxTheta2, "]");
+        writeln("    (expected: all weights in [0, 2])");
+        
+        if !weightsValid then allPassed = false;
+        
+        // =============================================
+        // Summary
+        // =============================================
+        if allPassed {
+            writeln("=== All Pseudo-Laplacian tests PASSED ===\n");
+        } else {
+            writeln("=== Some Pseudo-Laplacian tests FAILED ===\n");
+        }
+        
+        return allPassed;
     }
 }
