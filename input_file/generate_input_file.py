@@ -21,7 +21,7 @@ for n in N :
         content = content.replace('ALPHA=', f'ALPHA={alpha}')
         content = content.replace('MACH=', f'MACH={mach}')
         content = content.replace('OUTPUT_FILENAME=output/output.cgns', 
-                                  f'OUTPUT_FILENAME=/scratch/hitra/output/{output_filename}')
+                                  f'OUTPUT_FILENAME=/scratch/hitra/output2/{output_filename}')
         with open(filename, 'w') as f :
             f.write(content)
 

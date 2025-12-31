@@ -1,6 +1,6 @@
 GRID_FILENAME=/home/hitra/fullPotentialSolver/pre/naca0012_65x65.cgns
 ELEMENT_TYPE=QuadElements
-OUTPUT_FILENAME=/scratch/hitra/output/output_fps_65_alpha_1-5_mach_0-75.cgns
+OUTPUT_FILENAME=/scratch/hitra/output2/output_fps_65_alpha_1-5_mach_0-75.cgns
 CGNS_OUTPUT_FREQ=10000
 
 MACH=0.75
