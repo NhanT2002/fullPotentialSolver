@@ -1,0 +1,43 @@
+GRID_FILENAME=/home/hitra/fullPotentialSolver/pre/naca0012_257x257.cgns
+ELEMENT_TYPE=QuadElements
+OUTPUT_FILENAME=/scratch/hitra/output/output_fps_257_alpha_0-0_mach_0-1.cgns
+CGNS_OUTPUT_FREQ=10000
+
+MACH=0.1
+ALPHA=0.0
+TEMPERATURE=288
+GAMMA=1.4
+MU_C=1.0
+BETA=5e-3
+MACH_C=0.95
+
+X_REF=0.25
+Y_REF=0.0
+
+q_crit=2.0
+
+IT_MAX=1000000
+CONV_TOL=1e-8
+OMEGA=1.0
+
+LINE_SEARCH=true
+MAX_LINE_SEARCH=50
+SUFFICIENT_DECREASE=1.1
+
+SFD_ENABLED=false
+SFD_CHI=2.0       # Damping coefficient (0.1-1.0 typical)
+SFD_DELTA=1.5     # Filter width parameter (0.01-0.5 typical)
+
+MACH_CONTINUATION=false
+MACH_START=0.5     # Starting Mach number
+MACH_STEP=0.1      # Mach increment per step
+
+USE_NATIVE_GMRES=false
+GMRES_MAXIT=50
+GMRES_RTOL=1e-5
+GMRES_ATOL=1e-50
+GMRES_DTOL=1e3
+GMRES_RESTART=50
+GMRES_PRECON=ilu
+GMRES_PRECON_SIDE=right
+JACOBIAN_TYPE=numerical    # "analytical" or "numerical" (matrix-free finite differences)

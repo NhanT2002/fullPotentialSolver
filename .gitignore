@@ -1,6 +1,7 @@
 *.json
 *.cgns*
-*.txt
+input.txt
+/post/debug.txt
 output/
 bin/*
 *.gif
@@ -8,4 +9,4 @@ bin/*
 *.out
 doc/
 *.log
-input_file/
+/output*/
