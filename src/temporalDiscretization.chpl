@@ -880,12 +880,12 @@ class temporalDiscretization {
         // d(R_Γ)/dφ_lowerTE = +1
         
         // dKutta/dΓ = 1
-        this.A_petsc.add(this.gammaIndex_, this.gammaIndex_, 1.0);
+        this.A_petsc.add(this.gammaIndex_, this.gammaIndex_, 1.0 / (this.spatialDisc_.elemVolume_[this.spatialDisc_.upperTEelem_] + this.spatialDisc_.elemVolume_[this.spatialDisc_.lowerTEelem_]));
         
         // dKutta/dφ_upperTE1 = -1.0
-        this.A_petsc.add(this.gammaIndex_, this.spatialDisc_.upperTEelem_ - 1, -1.0);
+        this.A_petsc.add(this.gammaIndex_, this.spatialDisc_.upperTEelem_ - 1, -1.0 / (this.spatialDisc_.elemVolume_[this.spatialDisc_.upperTEelem_] + this.spatialDisc_.elemVolume_[this.spatialDisc_.lowerTEelem_]));
         // dKutta/dφ_lowerTE1 = +1.0
-        this.A_petsc.add(this.gammaIndex_, this.spatialDisc_.lowerTEelem_ - 1, 1.0);
+        this.A_petsc.add(this.gammaIndex_, this.spatialDisc_.lowerTEelem_ - 1, 1.0 / (this.spatialDisc_.elemVolume_[this.spatialDisc_.upperTEelem_] + this.spatialDisc_.elemVolume_[this.spatialDisc_.lowerTEelem_]));
         
         this.A_petsc.assemblyComplete();
         // this.A_petsc.matView();

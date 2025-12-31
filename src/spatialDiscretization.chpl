@@ -731,7 +731,7 @@ class spatialDiscretization {
         const phi_upper = this.phi_[this.upperTEelem_] + (this.uu_[this.upperTEelem_] * this.deltaSupperTEx_ + this.vv_[this.upperTEelem_] * this.deltaSupperTEy_);
         const phi_lower = this.phi_[this.lowerTEelem_] + (this.uu_[this.lowerTEelem_] * this.deltaSlowerTEx_ + this.vv_[this.lowerTEelem_] * this.deltaSlowerTEy_);
         const gamma_computed = phi_upper - phi_lower;
-        this.kutta_res_ = this.circulation_ - gamma_computed;
+        this.kutta_res_ = (this.circulation_ - gamma_computed) / (this.elemVolume_[this.upperTEelem_] + this.elemVolume_[this.lowerTEelem_]);
     }
 
     proc run() {
