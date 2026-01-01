@@ -38,11 +38,11 @@ GMRES_RTOL=1e-1
 GMRES_ATOL=1e-50
 GMRES_DTOL=1e3
 GMRES_RESTART=50
-GMRES_PRECON=ilu
+GMRES_PRECON=lu
 GMRES_PRECON_SIDE=right
 JACOBIAN_TYPE=numerical
 
-ADAPTIVE_GMRES_TOL=true   # Enable adaptive GMRES tolerance
+ADAPTIVE_GMRES_TOL=false   # Enable adaptive GMRES tolerance
 GMRES_RTOL_MAX=0.5         # Max (loose) tolerance for early iterations  
-GMRES_RTOL_MIN=1e-2        # Min (tight) tolerance for late iterations
+GMRES_RTOL_MIN=1e-1        # Min (tight) tolerance for late iterations
 GMRES_RTOL_ETA=0.1         # Eisenstat-Walker eta parameter (0 < eta < 1)
