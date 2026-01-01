@@ -28,7 +28,11 @@ class spatialDiscretization {
 
     var elem_dom: domain(1) = {1..0};
     var uu_: [elem_dom] real(64);
+    var graduuX_: [elem_dom] real(64);
+    var graduuY_: [elem_dom] real(64);
     var vv_: [elem_dom] real(64);
+    var gradvvX_: [elem_dom] real(64);
+    var gradvvY_: [elem_dom] real(64);
     var pp_: [elem_dom] real(64);
     var rhorho_: [elem_dom] real(64);
     var gradRhoX_: [elem_dom] real(64);
@@ -448,6 +452,18 @@ class spatialDiscretization {
             const vDotN = uInt * nx + vInt * ny;
             this.uu_[ghostElem] = uInt - 2.0 * vDotN * nx;
             this.vv_[ghostElem] = vInt - 2.0 * vDotN * ny;
+            
+            // For second-order reconstruction: mirror velocity gradients for ghost cells
+            // The tangential gradient is preserved, normal gradient is negated
+            // ∂u/∂n|ghost = -∂u/∂n|interior, ∂u/∂t|ghost = ∂u/∂t|interior
+            // This simplifies to reflecting the gradient across the wall normal
+            const graduuN_int = this.graduuX_[interiorElem] * nx + this.graduuY_[interiorElem] * ny;
+            const gradvvN_int = this.gradvvX_[interiorElem] * nx + this.gradvvY_[interiorElem] * ny;
+            
+            this.graduuX_[ghostElem] = this.graduuX_[interiorElem] - 2.0 * graduuN_int * nx;
+            this.graduuY_[ghostElem] = this.graduuY_[interiorElem] - 2.0 * graduuN_int * ny;
+            this.gradvvX_[ghostElem] = this.gradvvX_[interiorElem] - 2.0 * gradvvN_int * nx;
+            this.gradvvY_[ghostElem] = this.gradvvY_[interiorElem] - 2.0 * gradvvN_int * ny;
         }
 
         inline proc updateFarfieldGhostVelocity(face: int) {
@@ -467,6 +483,12 @@ class spatialDiscretization {
             const v_face = this.inputs_.V_INF_;
             this.uu_[ghostElem] = 2*u_face - this.uu_[interiorElem];
             this.vv_[ghostElem] = 2*v_face - this.vv_[interiorElem];
+            
+            // For second-order reconstruction: farfield has uniform velocity, so zero gradient
+            this.graduuX_[ghostElem] = 0.0;
+            this.graduuY_[ghostElem] = 0.0;
+            this.gradvvX_[ghostElem] = 0.0;
+            this.gradvvY_[ghostElem] = 0.0;
         }
         
         forall face in this.mesh_.edgeWall_ do updateWallGhostVelocity(face);
@@ -536,6 +558,9 @@ class spatialDiscretization {
 
     proc computeVelocityFromPhiLeastSquaresQR() {
         this.lsGradQR_!.computeGradient(this.phi_, this.uu_, this.vv_, this.kuttaCell_, this.circulation_);
+        // Compute velocity gradients for reconstruction
+        this.lsGradQR_!.computeGradient(this.uu_, this.graduuX_, this.graduuY_);
+        this.lsGradQR_!.computeGradient(this.vv_, this.gradvvX_, this.gradvvY_);
     }
 
     proc computeDensityFromVelocity() {
@@ -566,10 +591,19 @@ class spatialDiscretization {
     proc computeFaceProperties() {
         // Compute face properties using precomputed mesh coefficients.
         // 
+        // SECOND-ORDER RECONSTRUCTION:
+        // Instead of simple averaging, we extrapolate velocities from each
+        // cell centroid to the face centroid using gradients, then average:
+        //   u_L = u_1 + ∇u_1 · (x_face - x_1)
+        //   u_R = u_2 + ∇u_2 · (x_face - x_2)
+        //   u_avg = 0.5 * (u_L + u_R)
+        //
+        // This is the standard MUSCL-type approach for second-order FV methods.
+        // 
         // Face velocity with deferred correction:
         //   V_face = V_avg - (V_avg · t_IJ - dφ/dl) * corrCoeff
         // where:
-        //   - V_avg = average of cell-centered velocities
+        //   - V_avg = reconstructed average of cell velocities at face
         //   - t_IJ = unit vector from elem1 to elem2 (precomputed)
         //   - dφ/dl = (φ2 - φ1) * invL_IJ (direct phi difference)
         //   - corrCoeff = n / (n · t_IJ) (precomputed)
@@ -578,9 +612,28 @@ class spatialDiscretization {
             const elem1 = this.mesh_.edge2elem_[1, face];
             const elem2 = this.mesh_.edge2elem_[2, face];
 
-            // Average cell-centered velocities
-            const uAvg = 0.5 * (this.uu_[elem1] + this.uu_[elem2]);
-            const vAvg = 0.5 * (this.vv_[elem1] + this.vv_[elem2]);
+            // Face centroid
+            const fcx = this.faceCentroidX_[face];
+            const fcy = this.faceCentroidY_[face];
+            
+            // Displacement from elem1 centroid to face centroid
+            const dx1 = fcx - this.elemCentroidX_[elem1];
+            const dy1 = fcy - this.elemCentroidY_[elem1];
+            
+            // Displacement from elem2 centroid to face centroid
+            const dx2 = fcx - this.elemCentroidX_[elem2];
+            const dy2 = fcy - this.elemCentroidY_[elem2];
+            
+            // Reconstruct velocities at face from each side (MUSCL-type)
+            const uL = this.uu_[elem1] + this.graduuX_[elem1] * dx1 + this.graduuY_[elem1] * dy1;
+            const vL = this.vv_[elem1] + this.gradvvX_[elem1] * dx1 + this.gradvvY_[elem1] * dy1;
+            
+            const uR = this.uu_[elem2] + this.graduuX_[elem2] * dx2 + this.graduuY_[elem2] * dy2;
+            const vR = this.vv_[elem2] + this.gradvvX_[elem2] * dx2 + this.gradvvY_[elem2] * dy2;
+            
+            // Average the reconstructed values
+            const uAvg = 0.5 * (uL + uR);
+            const vAvg = 0.5 * (vL + vR);
 
             // Get phi values with potential jump across wake
             var phi1 = this.phi_[elem1];
@@ -813,7 +866,11 @@ class spatialDiscretization {
         const dom = {0..<this.nelemDomain_};
         var phi: [dom] real(64);
         var uu: [dom] real(64);
+        var graduX: [dom] real(64);
+        var graduY: [dom] real(64);
         var vv: [dom] real(64);
+        var gradvX: [dom] real(64);
+        var gradvY: [dom] real(64);
         var ww: [dom] real(64);
         var rhorho: [dom] real(64);
         var gradRhoX: [dom] real(64);
@@ -828,7 +885,11 @@ class spatialDiscretization {
         forall elem in 1..this.nelemDomain_ {
             phi[elem-1] = this.phi_[elem];
             uu[elem-1] = this.uu_[elem];
+            graduX[elem-1] = this.graduuX_[elem];
+            graduY[elem-1] = this.graduuY_[elem];
             vv[elem-1] = this.vv_[elem];
+            gradvX[elem-1] = this.gradvvX_[elem];
+            gradvY[elem-1] = this.gradvvY_[elem];
             rhorho[elem-1] = this.rhorho_[elem];
             gradRhoX[elem-1] = this.gradRhoX_[elem];
             gradRhoY[elem-1] = this.gradRhoY_[elem];
@@ -843,7 +904,11 @@ class spatialDiscretization {
         var fields = new map(string, [dom] real(64));
         fields["phi"] = phi;
         fields["VelocityX"] = uu;
+        fields["graduX"] = graduX;
+        fields["graduY"] = graduY;
         fields["VelocityY"] = vv;
+        fields["gradvX"] = gradvX;
+        fields["gradvY"] = gradvY;
         fields["VelocityZ"] = ww;
         fields["rho"] = rhorho;
         fields["gradRhoX"] = gradRhoX;
@@ -929,7 +994,11 @@ class spatialDiscretization {
         const dom = {0..<this.nelemDomain_};
         var phi: [dom] real(64);
         var uu: [dom] real(64);
+        var graduX: [dom] real(64);
+        var graduY: [dom] real(64);
         var vv: [dom] real(64);
+        var gradvX: [dom] real(64);
+        var gradvY: [dom] real(64);
         var ww: [dom] real(64);
         var rhorho: [dom] real(64);
         var gradRhoX: [dom] real(64);
@@ -944,7 +1013,11 @@ class spatialDiscretization {
         forall elem in 1..this.nelemDomain_ {
             phi[elem-1] = this.phi_[elem];
             uu[elem-1] = this.uu_[elem];
+            graduX[elem-1] = this.graduuX_[elem];
+            graduY[elem-1] = this.graduuY_[elem];
             vv[elem-1] = this.vv_[elem];
+            gradvX[elem-1] = this.gradvvX_[elem];
+            gradvY[elem-1] = this.gradvvY_[elem];
             rhorho[elem-1] = this.rhorho_[elem];
             gradRhoX[elem-1] = this.gradRhoX_[elem];
             gradRhoY[elem-1] = this.gradRhoY_[elem];
@@ -959,7 +1032,11 @@ class spatialDiscretization {
         var fields = new map(string, [dom] real(64));
         fields["phi"] = phi;
         fields["VelocityX"] = uu;
+        fields["graduX"] = graduX;
+        fields["graduY"] = graduY;
         fields["VelocityY"] = vv;
+        fields["gradvX"] = gradvX;
+        fields["gradvY"] = gradvY;
         fields["VelocityZ"] = ww;
         fields["rho"] = rhorho;
         fields["gradRhoX"] = gradRhoX;

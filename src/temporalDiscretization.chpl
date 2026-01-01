@@ -1112,6 +1112,28 @@ class temporalDiscretization {
             var its: int;
             var reason: int;
             
+            // === ADAPTIVE (INEXACT) NEWTON: Eisenstat-Walker forcing terms ===
+            // Idea: Use loose inner tolerance early (save GMRES iterations), 
+            //       tighten as outer residual decreases for quadratic convergence
+            // Reference: Eisenstat & Walker, SIAM J. Sci. Comput. 17(1), 1996
+            var current_rtol = this.inputs_.GMRES_RTOL_;
+            if this.inputs_.ADAPTIVE_GMRES_TOL_ && normalized_res < 1e12 {
+                // Eisenstat-Walker Choice 1: eta_k = |r_k - r_{k-1}| / |r_{k-1}|
+                // Simplified version: eta = eta_max * (res / first_res)^gamma
+                // This gives loose tolerance early and tight tolerance near convergence
+                const eta = this.inputs_.GMRES_RTOL_ETA_;
+                current_rtol = max(this.inputs_.GMRES_RTOL_MIN_,
+                                   min(this.inputs_.GMRES_RTOL_MAX_, 
+                                       eta * normalized_res));
+                // Update tolerances in solvers
+                if this.inputs_.USE_NATIVE_GMRES_ {
+                    this.nativeGmres_.setTolerance(current_rtol, this.inputs_.GMRES_ATOL_);
+                } else {
+                    this.ksp.setTolerances(current_rtol, this.inputs_.GMRES_ATOL_, 
+                                          this.inputs_.GMRES_DTOL_, this.inputs_.GMRES_MAXIT_);
+                }
+            }
+
             if this.inputs_.USE_NATIVE_GMRES_ {
                 // === NATIVE CHAPEL GMRES ===
                 const nDOF = this.spatialDisc_.nelemDomain_ + 1;
@@ -1276,11 +1298,20 @@ class temporalDiscretization {
             const (Cl, Cd, Cm) = this.spatialDisc_.computeAerodynamicCoefficients();
             time.stop();
             const elapsed = time.elapsed() + this.t0_;
-            writeln(" Time: ", elapsed, " It: ", this.it_,
-                    " res: ", res, " norm res: ", normalized_res, " kutta res: ", this.spatialDisc_.kutta_res_,
-                    " res wall: ", res_wall, " res fluid: ", res_fluid, " res wake: ", res_wake,
-                    " Cl: ", Cl, " Cd: ", Cd, " Cm: ", Cm, " Circulation: ", this.spatialDisc_.circulation_,
-                    " GMRES its: ", its, " reason: ", reason, " omega: ", omega, " LS its: ", lineSearchIts);
+            if this.inputs_.ADAPTIVE_GMRES_TOL_ {
+                writeln(" Time: ", elapsed, " It: ", this.it_,
+                        " res: ", res, " norm res: ", normalized_res, " kutta res: ", this.spatialDisc_.kutta_res_,
+                        " res wall: ", res_wall, " res fluid: ", res_fluid, " res wake: ", res_wake,
+                        " Cl: ", Cl, " Cd: ", Cd, " Cm: ", Cm, " Circulation: ", this.spatialDisc_.circulation_,
+                        " GMRES its: ", its, " reason: ", reason, " omega: ", omega, " LS its: ", lineSearchIts,
+                        " GMRES rtol: ", current_rtol);
+            } else {
+                writeln(" Time: ", elapsed, " It: ", this.it_,
+                        " res: ", res, " norm res: ", normalized_res, " kutta res: ", this.spatialDisc_.kutta_res_,
+                        " res wall: ", res_wall, " res fluid: ", res_fluid, " res wake: ", res_wake,
+                        " Cl: ", Cl, " Cd: ", Cd, " Cm: ", Cm, " Circulation: ", this.spatialDisc_.circulation_,
+                        " GMRES its: ", its, " reason: ", reason, " omega: ", omega, " LS its: ", lineSearchIts);
+            }
 
             this.timeList_.pushBack(elapsed);
             this.itList_.pushBack(this.it_);

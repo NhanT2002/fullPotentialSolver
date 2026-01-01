@@ -53,6 +53,12 @@ config const GMRES_PRECON_SIDE : string = "right";  // Preconditioning side: "le
 config const JACOBIAN_TYPE : string = "analytical";  // Jacobian type: "analytical" or "numerical"
 config const USE_NATIVE_GMRES : bool = false;  // Use Chapel-native GMRES instead of PETSc
 
+// Adaptive (Inexact) Newton parameters - Eisenstat-Walker forcing terms
+config const ADAPTIVE_GMRES_TOL : bool = false;  // Enable adaptive GMRES tolerance
+config const GMRES_RTOL_MAX : real(64) = 0.1;    // Max (loose) tolerance for early iterations
+config const GMRES_RTOL_MIN : real(64) = 1e-4;  // Min (tight) tolerance for late iterations
+config const GMRES_RTOL_ETA : real(64) = 0.9;   // Eisenstat-Walker eta parameter (0 < eta < 1)
+
 
 config const DUAL_TIME_STEP : bool;
 config const ALPHA_0 : real(64);
@@ -128,6 +134,12 @@ record potentialInputs {
     var GMRES_PRECON_SIDE_: string = GMRES_PRECON_SIDE;
     var JACOBIAN_TYPE_: string = JACOBIAN_TYPE;
     var USE_NATIVE_GMRES_: bool = USE_NATIVE_GMRES;
+
+    // Adaptive (Inexact) Newton parameters
+    var ADAPTIVE_GMRES_TOL_: bool = ADAPTIVE_GMRES_TOL;
+    var GMRES_RTOL_MAX_: real(64) = GMRES_RTOL_MAX;
+    var GMRES_RTOL_MIN_: real(64) = GMRES_RTOL_MIN;
+    var GMRES_RTOL_ETA_: real(64) = GMRES_RTOL_ETA;
 
     var DUAL_TIME_STEP_: bool = DUAL_TIME_STEP;
     var ALPHA_0_: real(64) = ALPHA_0;

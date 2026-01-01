@@ -1,6 +1,6 @@
 GRID_FILENAME=/home/hitra/fullPotentialSolver/pre/naca0012_33x33.cgns
 ELEMENT_TYPE=QuadElements
-OUTPUT_FILENAME=/scratch/hitra/output2/output_fps_33_alpha_1-5_mach_0-1.cgns
+OUTPUT_FILENAME=/scratch/hitra/output_adaptative_gmres/output_fps_33_alpha_1-5_mach_0-1.cgns
 CGNS_OUTPUT_FREQ=10000
 
 MACH=0.1
@@ -33,11 +33,16 @@ MACH_START=0.5     # Starting Mach number
 MACH_STEP=0.1      # Mach increment per step
 
 USE_NATIVE_GMRES=false
-GMRES_MAXIT=50
-GMRES_RTOL=1e-5
+GMRES_MAXIT=100000
+GMRES_RTOL=1e-1
 GMRES_ATOL=1e-50
 GMRES_DTOL=1e3
 GMRES_RESTART=50
 GMRES_PRECON=ilu
 GMRES_PRECON_SIDE=right
-JACOBIAN_TYPE=numerical    # "analytical" or "numerical" (matrix-free finite differences)
+JACOBIAN_TYPE=numerical
+
+ADAPTIVE_GMRES_TOL=true   # Enable adaptive GMRES tolerance
+GMRES_RTOL_MAX=0.5         # Max (loose) tolerance for early iterations  
+GMRES_RTOL_MIN=1e-2        # Min (tight) tolerance for late iterations
+GMRES_RTOL_ETA=0.1         # Eisenstat-Walker eta parameter (0 < eta < 1)
