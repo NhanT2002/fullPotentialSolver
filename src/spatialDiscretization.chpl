@@ -68,6 +68,7 @@ class spatialDiscretization {
     var uFace_: [face_dom] real(64);
     var vFace_: [face_dom] real(64);
     var rhoFace_: [face_dom] real(64);
+    var rhoIsenFace_: [face_dom] real(64);
     var pFace_: [face_dom] real(64);
     var machFace_: [face_dom] real(64);
     var velMagFace_: [face_dom] real(64);
@@ -98,6 +99,7 @@ class spatialDiscretization {
     var wall_dom: sparse subdomain(elemDomain_dom); // cell next to wall boundary
     var fluid_dom: sparse subdomain(elemDomain_dom); // all other cells without wall_dom
     var wake_dom: sparse subdomain(elemDomain_dom); // cells next to wake
+    var shock_dom: sparse subdomain(elemDomain_dom); // cells next to shock
     var wallFaceSet_: set(int);  // Set of wall face indices for efficient lookup
 
     proc init(Mesh: shared MeshData, ref inputs: potentialInputs) {
@@ -568,7 +570,13 @@ class spatialDiscretization {
             this.rhorho_[elem] = (1.0 + this.gamma_minus_one_over_two_ * this.inputs_.MACH_ * this.inputs_.MACH_ * 
                                  (1.0 - this.uu_[elem] * this.uu_[elem] - this.vv_[elem] * this.vv_[elem])) ** this.one_over_gamma_minus_one_;
             this.machmach_[elem] = this.mach(this.uu_[elem], this.vv_[elem], this.rhorho_[elem]);
-            this.mumu_[elem] = this.inputs_.MU_C_ * max(0.0, this.machmach_[elem]*this.machmach_[elem] - this.inputs_.MACH_C_*this.inputs_.MACH_C_);
+            
+            // Linear switching function:
+            // μ = μ_C * max(0, M² - M_C²)
+            // Properties: μ = 0 for M ≤ M_C, μ grows unboundedly with M² (sharper shock)
+            const M2 = this.machmach_[elem] * this.machmach_[elem];
+            const Mc2 = this.inputs_.MACH_C_ * this.inputs_.MACH_C_;
+            this.mumu_[elem] = this.inputs_.MU_C_ * max(0.0, M2 - Mc2);
         }
 
         forall face in this.mesh_.edgeWall_ {
@@ -586,6 +594,22 @@ class spatialDiscretization {
 
         // Compute gradient of rho
         this.lsGradQR_!.computeGradient(this.rhorho_, this.gradRhoX_, this.gradRhoY_);
+        // Compute shock_dom based on density gradient magnitude
+        this.shock_dom.clear();
+        for face in this.mesh_.edgeWall_ {
+            const elem1 = this.mesh_.edge2elem_[1, face];
+            const elem2 = this.mesh_.edge2elem_[2, face];
+            // Determine which element is interior
+            const (interiorElem, ghostElem) = 
+                if elem1 <= this.nelemDomain_ then (elem1, elem2) else (elem2, elem1);
+
+            const gradRhoMag = sqrt(this.gradRhoX_[interiorElem]*this.gradRhoX_[interiorElem] + 
+                                    this.gradRhoY_[interiorElem]*this.gradRhoY_[interiorElem]);
+            const machCell = this.machmach_[interiorElem];
+            if gradRhoMag >= 1.0 && machCell >= 0.9 && this.elemCentroidX_[interiorElem] >= 0.5 {
+                this.shock_dom += interiorElem;
+            }
+        }
     }
 
     proc computeFaceProperties() {
@@ -682,6 +706,7 @@ class spatialDiscretization {
             this.uFace_[face] = uFace;
             this.vFace_[face] = vFace;
             this.rhoFace_[face] = rhoFace;
+            this.rhoIsenFace_[face] = rhoFace; // Store isentropic density for later use
         }
     }
 
@@ -729,12 +754,9 @@ class spatialDiscretization {
             if mu <= 0.0 then continue;
             
             // Get isentropic and upwind densities
+            // Simplified: no gradient extrapolation for Jacobian consistency
             const rhoIsentropic = this.rhoFace_[face];
-            const dx = this.elemCentroidX_[upwindElem] - this.faceCentroidX_[face];
-            const dy = this.elemCentroidY_[upwindElem] - this.faceCentroidY_[face];
-            const rhoUpwind = this.rhorho_[upwindElem] + 
-                                this.gradRhoX_[upwindElem] * dx + 
-                                this.gradRhoY_[upwindElem] * dy;
+            const rhoUpwind = this.rhorho_[upwindElem];
             
             // Blend: ρ_face = ρ_isen - μ * (ρ_isen - ρ_upwind)
             this.rhoFace_[face] = rhoIsentropic - mu * (rhoIsentropic - rhoUpwind);
@@ -836,7 +858,7 @@ class spatialDiscretization {
         var fy = 0.0;
         var Cm = 0.0;
         forall face in this.mesh_.edgeWall_ with (+reduce fx, +reduce fy, +reduce Cm) {
-            const rhoFace = this.rhoFace_[face];
+            const rhoFace = this.rhoIsenFace_[face];
             const cpFace = (rhoFace**this.inputs_.GAMMA_ / (this.inputs_.GAMMA_ * this.inputs_.MACH_ * this.inputs_.MACH_ * this.inputs_.P_INF_) - 1 ) / (this.inputs_.GAMMA_/2*this.inputs_.MACH_**2);
             const nx = this.faceNormalX_[face];
             const ny = this.faceNormalY_[face];

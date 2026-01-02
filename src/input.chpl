@@ -29,6 +29,20 @@ config const MU_C : real(64);
 config const MACH_C : real(64);
 config const BETA : real(64); // Level of upwinding in Jacobian matrix
 
+// Adaptive upwinding parameters (Crovato thesis)
+config const ADAPTIVE_UPWIND : bool = false;  // Enable adaptive MU_C/MACH_C
+config const MU_C_START : real(64) = 2.0;     // Initial MU_C (strong stabilization)
+config const MU_C_FINAL : real(64) = 1.0;     // Final MU_C (accurate)
+config const MACH_C_START : real(64) = 0.92;  // Initial MACH_C (wide supersonic region)
+config const MACH_C_FINAL : real(64) = 0.95;  // Final MACH_C (narrow supersonic region)
+config const ADAPT_THRESHOLD : real(64) = 1e-2;  // Residual threshold to switch parameters
+
+// Adaptive BETA for Newton consistency (reduce BETA near convergence for quadratic rate)
+config const ADAPTIVE_BETA : bool = false;    // Enable adaptive BETA reduction
+config const BETA_START : real(64) = 5e-3;    // Initial BETA (strong Jacobian conditioning)
+config const BETA_FINAL : real(64) = 0.0;     // Final BETA (pure Newton for quadratic convergence)
+config const BETA_THRESHOLD : real(64) = 1e-4; // Residual threshold to reduce BETA
+
 config const LINE_SEARCH : bool;
 config const MAX_LINE_SEARCH : int = 5;
 config const SUFFICIENT_DECREASE : real(64) = 1.2;
@@ -109,6 +123,22 @@ record potentialInputs {
     var MU_C_: real(64) = MU_C;
     var MACH_C_: real(64) = MACH_C;
     var BETA_: real(64) = BETA;
+
+    // Adaptive upwinding (Crovato thesis)
+    var ADAPTIVE_UPWIND_: bool = ADAPTIVE_UPWIND;
+    var MU_C_START_: real(64) = MU_C_START;
+    var MU_C_FINAL_: real(64) = MU_C_FINAL;
+    var MACH_C_START_: real(64) = MACH_C_START;
+    var MACH_C_FINAL_: real(64) = MACH_C_FINAL;
+    var ADAPT_THRESHOLD_: real(64) = ADAPT_THRESHOLD;
+    var upwindAdapted_: bool = false;  // Track if we've switched to final values
+
+    // Adaptive BETA for Newton consistency
+    var ADAPTIVE_BETA_: bool = ADAPTIVE_BETA;
+    var BETA_START_: real(64) = BETA_START;
+    var BETA_FINAL_: real(64) = BETA_FINAL;
+    var BETA_THRESHOLD_: real(64) = BETA_THRESHOLD;
+    var betaAdapted_: bool = false;  // Track if we've switched to final BETA
 
     var LINE_SEARCH_: bool = LINE_SEARCH;
     var MAX_LINE_SEARCH_: int = MAX_LINE_SEARCH;

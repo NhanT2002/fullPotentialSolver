@@ -513,93 +513,15 @@ class temporalDiscretization {
                     face_diag += 0.5 * (wx_neighborToElem * mx + wy_neighborToElem * my);
                     
                     // Apply sign and area to gradient terms
-                    diag += sign * face_diag * area * rhoFace;
+                    const gradContrib = sign * face_diag * area * rhoFace;
+                    diag += gradContrib;
                     
                     // Direct phi term: d((phi_2 - phi_1) * directCoeff)/d(phi_elem)
-                    diag -= directCoeff * area * rhoFace;
-                    
-                    // === DENSITY RETARDATION FOR TRANSONIC FLOWS ===
-                    // In supersonic regions, ρ_face depends on upwind density:
-                    //   ρ_face = (1-μ) * ρ_isen + μ * ρ_upwind
-                    // The flux F = ρ_face * (V·n) * A includes ∂ρ_face/∂φ terms.
-                    //
-                    // Full derivative:
-                    // ∂ρ_face/∂φ = (1-μ)*∂ρ_isen/∂φ + μ*∂ρ_upwind/∂φ + (∂μ/∂φ)*(ρ_upwind - ρ_isen)
-                    //
-                    // ∂F/∂φ = ρ_face * ∂(V·n)/∂φ * A + (V·n) * ∂ρ_face/∂φ * A
-                    //                 ^^^^^^^^^^^^^^^^^     ^^^^^^^^^^^^^^^^^
-                    //                 (already included)    (add these terms)
-                    //
-                    // Compute face velocity and normal velocity
-                    const uFace = this.spatialDisc_.uFace_[face];
-                    const vFace = this.spatialDisc_.vFace_[face];
-                    const vDotN = uFace * nx + vFace * ny;
-                    
-                    // Determine upwind element
-                    const upwindElem = this.spatialDisc_.upwindElem_[face];
-                    
-                    // Compute local Mach at upwind cell
-                    const rhoUpwind = this.spatialDisc_.rhorho_[upwindElem];
-                    const uUpwind = this.spatialDisc_.uu_[upwindElem];
-                    const vUpwind = this.spatialDisc_.vv_[upwindElem];
-                    const machUpwind = this.spatialDisc_.machmach_[upwindElem];
-                    
-                    // Switching function: μ = μ_c * max(0, M² - M_c²)
-                    const mu_upwind = this.spatialDisc_.mumu_[upwindElem];
-                    
-                    // Add density retardation if in supersonic region
-                    if mu_upwind > 0.0 {
-                        const gamma = this.inputs_.GAMMA_;
-                        const Minf2 = this.inputs_.MACH_ * this.inputs_.MACH_;
-                        const velMag2 = uUpwind*uUpwind + vUpwind*vUpwind;
-                        const velMag = sqrt(velMag2);
-                        
-                        // Get isentropic density at face for ∂μ/∂φ term
-                        // ρ_isen was the original rhoFace before artificial density was applied
-                        // We can recover it: ρ_face = ρ_isen - μ*(ρ_isen - ρ_upwind)
-                        // => ρ_isen = (ρ_face - μ*ρ_upwind) / (1 - μ)
-                        const rhoIsen = if mu_upwind < 0.999 
-                                        then (rhoFace - mu_upwind * rhoUpwind) / (1.0 - mu_upwind)
-                                        else rhoUpwind;
-                        
-                        // === Term 1: μ * ∂ρ_upwind/∂φ (already implemented) ===
-                        // ∂ρ_upwind/∂V = -ρ^(2-γ) * M∞² * |V|
-                        const drho_dVelMag = -rhoUpwind**(2.0-gamma) * Minf2 * velMag;
-                        
-                        // ∂|V|/∂φ_upwind = -sumW · (V/|V|)
-                        var dVelMag_dPhi_upwind = 0.0;
-                        if velMag > 1e-10 {
-                            const sumWx_upwind = this.spatialDisc_.lsGradQR_!.sumWx_[upwindElem];
-                            const sumWy_upwind = this.spatialDisc_.lsGradQR_!.sumWy_[upwindElem];
-                            dVelMag_dPhi_upwind = (-sumWx_upwind * uUpwind - sumWy_upwind * vUpwind) / velMag;
-                        }
-                        
-                        // ∂ρ_face/∂φ from Term 1: μ * ∂ρ_upwind/∂φ
-                        var drhoFace_dPhi_upwind = mu_upwind * drho_dVelMag * dVelMag_dPhi_upwind;
-                        
-                        // === Term 2: (∂μ/∂φ) * (ρ_upwind - ρ_isen) ===
-                        // μ = μ_c * (M² - M_c²)
-                        // ∂μ/∂M = μ_c * 2*M
-                        // ∂M/∂|V| ≈ M / |V| (dominant term, treating ρ as approximately constant)
-                        // ∂μ/∂|V| = ∂μ/∂M * ∂M/∂|V| = μ_c * 2*M * (M/|V|) = μ_c * 2*M²/|V|
-                        // ∂μ/∂φ = ∂μ/∂|V| * ∂|V|/∂φ
-                        if velMag > 1e-10 {
-                            const dmu_dVelMag = this.inputs_.MU_C_ * 2.0 * machUpwind * machUpwind / velMag;
-                            const dmu_dPhi_upwind = dmu_dVelMag * dVelMag_dPhi_upwind;
-                            
-                            // Add contribution: (∂μ/∂φ) * (ρ_upwind - ρ_isen)
-                            drhoFace_dPhi_upwind += dmu_dPhi_upwind * (rhoUpwind - rhoIsen);
-                        }
-                        
-                        // Add contribution to Jacobian: (V·n) * ∂ρ_face/∂φ_upwind * A
-                        const densityRetardation = vDotN * drhoFace_dPhi_upwind * area;
-                        
-                        if upwindElem == elem {
-                            // Add to diagonal
-                            diag += sign * densityRetardation;
-                        }
-                        // Note: off-diagonal contribution for upwind neighbor is handled below
-                    }
+                    // For elem = elem1: d(phi2-phi1)/dphi1 = -1, sign=+1 → -directCoeff
+                    // For elem = elem2: d(phi2-phi1)/dphi2 = +1, sign=-1 → -directCoeff
+                    // Combined: always -directCoeff * ρ * A (no sign multiplication)
+                    const directContrib = -directCoeff * area * rhoFace;
+                    diag += directContrib;
                     
                     // === OFF-DIAGONAL CONTRIBUTION ===
                     const sumWx_neighbor = this.spatialDisc_.lsGradQR_!.sumWx_[neighbor];
@@ -614,40 +536,26 @@ class temporalDiscretization {
                     // Apply sign and area to gradient terms
                     offdiag *= sign * area * rhoFace;
                     
-                    // Direct phi term
+                    // Direct phi term: d((phi_2 - phi_1) * directCoeff)/d(phi_neighbor)
+                    // For elem1's residual, neighbor=elem2, d(phi2-phi1)/dphi2 = +1
+                    // For elem2's residual, neighbor=elem1, d(phi2-phi1)/dphi1 = -1
+                    // With sign factor: sign * d(phi2-phi1)/dphi_neighbor
+                    //   elem is elem1: sign=+1, neighbor=elem2: d/dphi2 = +1 → contribution = +directCoeff
+                    //   elem is elem2: sign=-1, neighbor=elem1: d/dphi1 = -1 → contribution = +directCoeff
+                    // So regardless of which side elem is on, the direct contribution is +directCoeff
+                    // BUT wait - this doesn't match the diagonal analysis. Let me reconsider...
+                    //
+                    // Actually, for elem being elem1:
+                    //   R_elem1 = +1 * flux = ρ*(V·m)*A
+                    //   V·m includes directCoeff*(phi2-phi1)
+                    //   dR_elem1/dphi2 = +1 * ρ * A * (+directCoeff) = +ρ*A*directCoeff
+                    //
+                    // For elem being elem2:
+                    //   R_elem2 = -1 * flux = -ρ*(V·m)*A  
+                    //   dR_elem2/dphi1 = -1 * ρ * A * (-directCoeff) = +ρ*A*directCoeff
+                    //
+                    // So the direct term contributes +directCoeff*ρ*A to off-diagonal ALWAYS (no sign)
                     offdiag += directCoeff * area * rhoFace;
-                    
-                    // Add density retardation for off-diagonal if neighbor is upwind
-                    if mu_upwind > 0.0 && upwindElem == neighbor {
-                        const gamma = this.inputs_.GAMMA_;
-                        const Minf2 = this.inputs_.MACH_ * this.inputs_.MACH_;
-                        const velMag2 = uUpwind*uUpwind + vUpwind*vUpwind;
-                        const velMag = sqrt(velMag2);
-                        const drho_dVelMag = -rhoUpwind**(2.0-gamma) * Minf2 * velMag;
-                        
-                        // Get isentropic density at face
-                        const rhoIsen = if mu_upwind < 0.999 
-                                        then (rhoFace - mu_upwind * rhoUpwind) / (1.0 - mu_upwind)
-                                        else rhoUpwind;
-                        
-                        var dVelMag_dPhi_neighbor = 0.0;
-                        if velMag > 1e-10 {
-                            dVelMag_dPhi_neighbor = (-sumWx_neighbor * uUpwind - sumWy_neighbor * vUpwind) / velMag;
-                        }
-                        
-                        // Term 1: μ * ∂ρ_upwind/∂φ_neighbor
-                        var drhoFace_dPhi_neighbor = mu_upwind * drho_dVelMag * dVelMag_dPhi_neighbor;
-                        
-                        // Term 2: (∂μ/∂φ_neighbor) * (ρ_upwind - ρ_isen)
-                        if velMag > 1e-10 {
-                            const dmu_dVelMag = this.inputs_.MU_C_ * 2.0 * machUpwind * machUpwind / velMag;
-                            const dmu_dPhi_neighbor = dmu_dVelMag * dVelMag_dPhi_neighbor;
-                            drhoFace_dPhi_neighbor += dmu_dPhi_neighbor * (rhoUpwind - rhoIsen);
-                        }
-                        
-                        const densityRetardation = vDotN * drhoFace_dPhi_neighbor * area;
-                        offdiag += sign * densityRetardation;
-                    }
                     
                     this.A_petsc.add(elem-1, neighbor-1, offdiag * this.spatialDisc_.invElemVolume_[elem]);
 
@@ -754,17 +662,15 @@ class temporalDiscretization {
                             dVelMag_dPhi_int = (dux_dPhi * uInt + dvy_dPhi * vInt) / velMag;
                         }
                         
-                        // Get isentropic density at face
-                        const rhoIsen = if mu_int < 0.999 
-                                        then (rhoFace - mu_int * rhoInt) / (1.0 - mu_int)
-                                        else rhoInt;
+                        // Get pre-stored isentropic density at face
+                        const rhoIsen = this.spatialDisc_.rhoIsenFace_[face];
                         
                         // Term 1: μ * ∂ρ_upwind/∂φ_int
                         var drhoFace_dPhi_int = mu_int * drho_dVelMag * dVelMag_dPhi_int;
                         
                         // Term 2: (∂μ/∂φ_int) * (ρ_upwind - ρ_isen)
                         if velMag > 1e-10 {
-                            const dmu_dVelMag = this.inputs_.MU_C_ * 2.0 * machInt * machInt / velMag;
+                            const dmu_dVelMag = this.spatialDisc_.inputs_.MU_C_ * 2.0 * machInt * machInt / velMag;
                             const dmu_dPhi_int = dmu_dVelMag * dVelMag_dPhi_int;
                             drhoFace_dPhi_int += dmu_dPhi_int * (rhoInt - rhoIsen);
                         }
@@ -834,7 +740,7 @@ class temporalDiscretization {
             for face in faces {
                 const machFace = this.spatialDisc_.machFace_[face];
                 
-                if machFace >= this.inputs_.MACH_C_ {
+                if machFace >= this.spatialDisc_.inputs_.MACH_C_ {
                     const elem1 = this.spatialDisc_.mesh_.edge2elem_[1, face];
                     const elem2 = this.spatialDisc_.mesh_.edge2elem_[2, face];
                     
@@ -1051,6 +957,21 @@ class temporalDiscretization {
             this.t0_ = time.last;
             this.first_res_ = res.first;
         }
+
+        // Reset adaptive upwinding state for new Mach number
+        this.inputs_.upwindAdapted_ = false;
+        if this.inputs_.ADAPTIVE_UPWIND_ {
+            this.spatialDisc_.inputs_.MU_C_ = this.inputs_.MU_C_START_;
+            this.spatialDisc_.inputs_.MACH_C_ = this.inputs_.MACH_C_START_;
+            writeln("  >>> Adaptive upwinding: starting with MU_C=", this.inputs_.MU_C_, ", MACH_C=", this.inputs_.MACH_C_);
+        }
+        
+        // Reset adaptive BETA state for new Mach number
+        this.inputs_.betaAdapted_ = false;
+        if this.inputs_.ADAPTIVE_BETA_ {
+            this.inputs_.BETA_ = this.inputs_.BETA_START_;
+            writeln("  >>> Adaptive BETA: starting with BETA=", this.inputs_.BETA_);
+        }
     }
 
     // Reset solver state for Mach continuation (keeps current solution as initial guess)
@@ -1061,6 +982,19 @@ class temporalDiscretization {
         // Update the inputs record in this class and in spatialDiscretization
         this.inputs_ = newInputs;
         this.spatialDisc_.updateInputs(newInputs);
+        
+        // Reset adaptive upwinding state for new Mach number
+        this.inputs_.upwindAdapted_ = false;
+        if this.inputs_.ADAPTIVE_UPWIND_ {
+            this.inputs_.MU_C_ = this.inputs_.MU_C_START_;
+            this.inputs_.MACH_C_ = this.inputs_.MACH_C_START_;
+        }
+        
+        // Reset adaptive BETA state for new Mach number
+        this.inputs_.betaAdapted_ = false;
+        if this.inputs_.ADAPTIVE_BETA_ {
+            this.inputs_.BETA_ = this.inputs_.BETA_START_;
+        }
         
         // Recompute Jacobian sparsity pattern (in case it changed, though typically it doesn't)
         this.computeGradientSensitivity();
@@ -1099,6 +1033,29 @@ class temporalDiscretization {
         while ((normalized_res > this.inputs_.CONV_TOL_ && res > this.inputs_.CONV_ATOL_) && this.it_ < this.inputs_.IT_MAX_ && isNan(normalized_res) == false) {
             this.it_ += 1;
             time.start();
+
+            // === ADAPTIVE UPWINDING (Crovato thesis) ===
+            // Start with strong stabilization (high MU_C, low MACH_C), then switch to
+            // accurate values (low MU_C, high MACH_C) once residual drops below threshold
+            if this.inputs_.ADAPTIVE_UPWIND_ && !this.inputs_.upwindAdapted_ {
+                if normalized_res < this.inputs_.ADAPT_THRESHOLD_ {
+                    this.spatialDisc_.inputs_.MU_C_ = this.inputs_.MU_C_FINAL_;
+                    this.spatialDisc_.inputs_.MACH_C_ = this.inputs_.MACH_C_FINAL_;
+                    this.inputs_.upwindAdapted_ = true;
+                    writeln("  >>> Adaptive upwinding: switching to MU_C=", this.spatialDisc_.inputs_.MU_C_, ", MACH_C=", this.spatialDisc_.inputs_.MACH_C_);
+                }
+            }
+
+            // === ADAPTIVE BETA (for Newton consistency / quadratic convergence) ===
+            // Start with non-zero BETA for Jacobian conditioning, reduce to zero near
+            // convergence to restore true Newton method with quadratic convergence rate
+            if this.inputs_.ADAPTIVE_BETA_ && !this.inputs_.betaAdapted_ {
+                if normalized_res < this.inputs_.BETA_THRESHOLD_ {
+                    this.inputs_.BETA_ = this.inputs_.BETA_FINAL_;
+                    this.inputs_.betaAdapted_ = true;
+                    writeln("  >>> Adaptive BETA: switching to BETA=", this.inputs_.BETA_, " for Newton consistency");
+                }
+            }
 
             this.computeJacobian();
             
@@ -1294,6 +1251,7 @@ class temporalDiscretization {
             const res_wall = RMSE(this.spatialDisc_.res_[this.spatialDisc_.wall_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.wall_dom]);
             const res_fluid = RMSE(this.spatialDisc_.res_[this.spatialDisc_.fluid_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.fluid_dom]);
             const res_wake = RMSE(this.spatialDisc_.res_[this.spatialDisc_.wake_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.wake_dom]);
+            const res_shock = RMSE(this.spatialDisc_.res_[this.spatialDisc_.shock_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.shock_dom]);
 
             const (Cl, Cd, Cm) = this.spatialDisc_.computeAerodynamicCoefficients();
             time.stop();
@@ -1301,14 +1259,14 @@ class temporalDiscretization {
             if this.inputs_.ADAPTIVE_GMRES_TOL_ {
                 writeln(" Time: ", elapsed, " It: ", this.it_,
                         " res: ", res, " norm res: ", normalized_res, " kutta res: ", this.spatialDisc_.kutta_res_,
-                        " res wall: ", res_wall, " res fluid: ", res_fluid, " res wake: ", res_wake,
+                        " res wall: ", res_wall, " res fluid: ", res_fluid, " res wake: ", res_wake, " res shock: ", res_shock,
                         " Cl: ", Cl, " Cd: ", Cd, " Cm: ", Cm, " Circulation: ", this.spatialDisc_.circulation_,
                         " GMRES its: ", its, " reason: ", reason, " omega: ", omega, " LS its: ", lineSearchIts,
                         " GMRES rtol: ", current_rtol);
             } else {
                 writeln(" Time: ", elapsed, " It: ", this.it_,
                         " res: ", res, " norm res: ", normalized_res, " kutta res: ", this.spatialDisc_.kutta_res_,
-                        " res wall: ", res_wall, " res fluid: ", res_fluid, " res wake: ", res_wake,
+                        " res wall: ", res_wall, " res fluid: ", res_fluid, " res wake: ", res_wake, " res shock: ", res_shock,
                         " Cl: ", Cl, " Cd: ", Cd, " Cm: ", Cm, " Circulation: ", this.spatialDisc_.circulation_,
                         " GMRES its: ", its, " reason: ", reason, " omega: ", omega, " LS its: ", lineSearchIts);
             }
