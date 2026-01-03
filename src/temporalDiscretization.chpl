@@ -556,6 +556,79 @@ class temporalDiscretization {
                     //
                     // So the direct term contributes +directCoeff*ρ*A to off-diagonal ALWAYS (no sign)
                     offdiag += directCoeff * area * rhoFace;
+
+                    // === Transonic DENSITY RETARDATION CONTRIBUTION ===
+                    // In supersonic regions, ρ_face depends on upwind cell density:
+                    //   ρ_face = (1-μ) * ρ_isen + μ * ρ_upwind = ρ_isen + μ*(ρ_upwind - ρ_isen)
+                    // We consider ρ_isen and ρ_upwind constants here for simplicity.
+                    // Thus, we will only compute contribution from μ dependence on φ.
+                    // For interior faces, upwind depends on flow direction.
+                    // So ∂F/∂φ includes: (V_avg · n) * ∂ρ_face/∂φ_upwind * A
+                    const upwindElem = this.spatialDisc_.upwindElem_[face];
+                    const mu_upwind = this.spatialDisc_.mumu_[upwindElem];
+
+                    // if mu_upwind > 0.0 {
+                    //     const uFace = this.spatialDisc_.uFace_[face];
+                    //     const vFace = this.spatialDisc_.vFace_[face];
+                    //     const V_dot_n = uFace * nx + vFace * ny;
+                    //     const rho_isen = this.spatialDisc_.rhoIsenFace_[face];
+                    //     const rho_upwind = this.spatialDisc_.rhorho_[upwindElem];
+                    //     // Compute dμ/dφ_upwind
+                    //     // μ = MU_C * (Mach^2 - MACH_C^2)
+                    //     // Mach^2 = (u^2 + v^2) / a^2 // We consider a constant here for simplicity
+                    //     // dμ/dφ = MU_C * d(Mach^2)/dφ
+                    //     // d(Mach^2)/dφ = 2*(u*du/dφ + v*dv/dφ) / a^2
+                    //     if elem == upwindElem {
+                    //         // upwind is elem
+                    //         const uElem = this.spatialDisc_.uu_[elem];
+                    //         const vElem = this.spatialDisc_.vv_[elem];
+                    //         const rhoElem = this.spatialDisc_.rhorho_[elem];
+                    //         const a_squared = rhoElem**(this.spatialDisc_.inputs_.GAMMA_ - 1.0) / this.spatialDisc_.inputs_.MACH_**2;
+
+                    //         const du_dphi = -sumWx_elem;
+                    //         const dv_dphi = -sumWy_elem;
+
+                    //         const dMach2_dphi = 2.0 * (uElem * du_dphi + vElem * dv_dphi) / a_squared;
+                    //         const dmu_dphi = this.spatialDisc_.inputs_.MU_C_ * dMach2_dphi;
+
+                    //         // Contribution to dflux/dφ_elem
+                    //         const densityRetardationContrib = V_dot_n * dmu_dphi * (rho_upwind - rho_isen) * area;
+                    //         diag += sign * densityRetardationContrib;
+
+                    //         // Contribution to dflux/dφ_neighbor
+                    //         const du_dphi_neighbor = wx_elemToNeighbor;
+                    //         const dv_dphi_neighbor = wy_elemToNeighbor;
+                    //         const dMach2_dphi_neighbor = 2.0 * (uElem * du_dphi_neighbor + vElem * dv_dphi_neighbor) / a_squared;
+                    //         const dmu_dphi_neighbor = this.spatialDisc_.inputs_.MU_C_ * dMach2_dphi_neighbor;
+                    //         const densityRetardationContrib_neighbor = V_dot_n * dmu_dphi_neighbor * (rho_upwind - rho_isen) * area;
+                    //         offdiag += sign * densityRetardationContrib_neighbor;
+                    //     } 
+                    //     else if neighbor == upwindElem {
+                    //         // upwind is neighbor
+                    //         const uNeighbor = this.spatialDisc_.uu_[neighbor];
+                    //         const vNeighbor = this.spatialDisc_.vv_[neighbor];
+                    //         const rhoNeighbor = this.spatialDisc_.rhorho_[neighbor];
+                    //         const a_squared = rhoNeighbor**(this.spatialDisc_.inputs_.GAMMA_ - 1.0) / this.spatialDisc_.inputs_.MACH_**2;
+
+                    //         const du_dphi = wx_neighborToElem;
+                    //         const dv_dphi = wy_neighborToElem;
+
+                    //         const dMach2_dphi = 2.0 * (uNeighbor * du_dphi + vNeighbor * dv_dphi) / a_squared;
+                    //         const dmu_dphi = this.spatialDisc_.inputs_.MU_C_ * dMach2_dphi;
+
+                    //         // Contribution to dflux/dφ_elem
+                    //         const densityRetardationContrib = V_dot_n * dmu_dphi * (rho_upwind - rho_isen) * area;
+                    //         diag += sign * densityRetardationContrib;
+
+                    //         // Contribution to dflux/dφ_neighbor
+                    //         const du_dphi_neighbor = -sumWx_neighbor;
+                    //         const dv_dphi_neighbor = -sumWy_neighbor;
+                    //         const dMach2_dphi_neighbor = 2.0 * (uNeighbor * du_dphi_neighbor + vNeighbor * dv_dphi_neighbor) / a_squared;
+                    //         const dmu_dphi_neighbor = this.spatialDisc_.inputs_.MU_C_ * dMach2_dphi_neighbor;
+                    //         const densityRetardationContrib_neighbor = V_dot_n * dmu_dphi_neighbor * (rho_upwind - rho_isen) * area;
+                    //         offdiag += sign * densityRetardationContrib_neighbor;
+                    //     }
+                    // }
                     
                     this.A_petsc.add(elem-1, neighbor-1, offdiag * this.spatialDisc_.res_scale_);
 
@@ -630,55 +703,32 @@ class temporalDiscretization {
                     // No off-diagonal since ghost is not a real DOF
 
                     // === DENSITY RETARDATION FOR WALL FACES ===
-                    // Wall flux = ρ_face * (V_int · m_wall) * A
-                    // In supersonic regions, ρ_face depends on upwind (interior) density:
-                    //   ρ_face = (1-μ) * ρ_isen + μ * ρ_upwind
-                    // where upwind = interior cell for wall faces.
-                    //
-                    // ∂F/∂φ includes: (V_int · m_wall) * ∂ρ_face/∂φ_int * A
-                    const uInt = this.spatialDisc_.uu_[elem];
-                    const vInt = this.spatialDisc_.vv_[elem];
-                    const vDotMwall = uInt * mWallX + vInt * mWallY;
-                    
-                    const mu_int = this.spatialDisc_.mumu_[elem];
-                    
-                    if mu_int > 0.0 {
-                        const gamma = this.inputs_.GAMMA_;
-                        const Minf2 = this.inputs_.MACH_ * this.inputs_.MACH_;
-                        const rhoInt = this.spatialDisc_.rhorho_[elem];
-                        const machInt = this.spatialDisc_.machmach_[elem];
-                        const velMag2 = uInt*uInt + vInt*vInt;
-                        const velMag = sqrt(velMag2);
-                        
-                        // ∂ρ_upwind/∂|V| = -ρ^(2-γ) * M∞² * |V|
-                        const drho_dVelMag = -rhoInt**(2.0-gamma) * Minf2 * velMag;
-                        
-                        // ∂|V|/∂φ_int = -sumW · (V/|V|)
-                        // For wall, gradient includes ghost contribution: use (-sumW + w_ghost)
-                        var dVelMag_dPhi_int = 0.0;
-                        if velMag > 1e-10 {
-                            const dux_dPhi = -sumWx_elem + wx_elemToNeighbor;
-                            const dvy_dPhi = -sumWy_elem + wy_elemToNeighbor;
-                            dVelMag_dPhi_int = (dux_dPhi * uInt + dvy_dPhi * vInt) / velMag;
-                        }
-                        
-                        // Get pre-stored isentropic density at face
-                        const rhoIsen = this.spatialDisc_.rhoIsenFace_[face];
-                        
-                        // Term 1: μ * ∂ρ_upwind/∂φ_int
-                        var drhoFace_dPhi_int = mu_int * drho_dVelMag * dVelMag_dPhi_int;
-                        
-                        // Term 2: (∂μ/∂φ_int) * (ρ_upwind - ρ_isen)
-                        if velMag > 1e-10 {
-                            const dmu_dVelMag = this.spatialDisc_.inputs_.MU_C_ * 2.0 * machInt * machInt / velMag;
-                            const dmu_dPhi_int = dmu_dVelMag * dVelMag_dPhi_int;
-                            drhoFace_dPhi_int += dmu_dPhi_int * (rhoInt - rhoIsen);
-                        }
-                        
-                        // Add contribution: (V_int · m_wall) * ∂ρ_face/∂φ_int * A
-                        const densityRetardation = vDotMwall * drhoFace_dPhi_int * area;
-                        diag += sign * densityRetardation;
-                    }
+                    // Similar to interior faces, but upwind cell can only be the interior cell
+                    const upwindElem = elem;
+                    const mu_upwind = this.spatialDisc_.mumu_[upwindElem];
+
+                    // if mu_upwind > 0.0 {
+                    //     const uFace = this.spatialDisc_.uFace_[face];
+                    //     const vFace = this.spatialDisc_.vFace_[face];
+                    //     const V_dot_n = uFace * nx + vFace * ny;
+                    //     const rho_isen = this.spatialDisc_.rhoIsenFace_[face];
+                    //     const rho_upwind = this.spatialDisc_.rhorho_[upwindElem];
+                    //     // Compute dμ/dφ_upwind
+                    //     const uElem = this.spatialDisc_.uu_[elem];
+                    //     const vElem = this.spatialDisc_.vv_[elem];
+                    //     const rhoElem = this.spatialDisc_.rhorho_[elem];
+                    //     const a_squared = rhoElem**(this.spatialDisc_.inputs_.GAMMA_ - 1.0) / this.spatialDisc_.inputs_.MACH_**2;
+
+                    //     const du_dphi = -sumWx_elem + wx_elemToNeighbor;
+                    //     const dv_dphi = -sumWy_elem + wy_elemToNeighbor;
+
+                    //     const dMach2_dphi = 2.0 * (uElem * du_dphi + vElem * dv_dphi) / a_squared;
+                    //     const dmu_dphi = this.spatialDisc_.inputs_.MU_C_ * dMach2_dphi;
+
+                    //     // Contribution to dflux/dφ_elem
+                    //     const densityRetardationContrib = V_dot_n * dmu_dphi * (rho_upwind - rho_isen) * area;
+                    //     diag += sign * densityRetardationContrib;
+                    // }
 
                     // === CIRCULATION (Γ) DERIVATIVE FOR WALL FACES ===
                     // Wall flux = V_int · m_wall * A, where V_int = ∇φ_int

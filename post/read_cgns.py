@@ -74,9 +74,9 @@ def readHSPM(filename) :
             'Y_wall': y,
             'Cp_wall': cp}
 
-data = readCGNS("../output/output_691.cgns")
-data2 = readCGNS("../output/output_679.cgns")
-data3 = readCGNS("../output/output_686.cgns")
+data = readCGNS("../output/output_700.cgns")
+data2 = readCGNS("../output/output_701.cgns")
+data3 = readCGNS("../output/output_712.cgns")
 
 data_hspm = readHSPM("../output/HSPM_naca0012_A1-25.dat")
 
