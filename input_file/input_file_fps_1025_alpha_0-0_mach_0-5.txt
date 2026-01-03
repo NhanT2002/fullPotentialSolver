@@ -1,10 +1,10 @@
-GRID_FILENAME=/home/hitra/fullPotentialSolver/pre/naca0012_257x257.cgns
+GRID_FILENAME=/home/hitra/fullPotentialSolver/pre/naca0012_1025x1025.cgns
 ELEMENT_TYPE=QuadElements
-OUTPUT_FILENAME=/scratch/hitra/output_scale_res/output_fps_257_alpha_1-5_mach_0-75.cgns
+OUTPUT_FILENAME=/scratch/hitra/output_scale_res/output_fps_1025_alpha_0-0_mach_0-5.cgns
 CGNS_OUTPUT_FREQ=10000
 
-MACH=0.75
-ALPHA=1.5
+MACH=0.5
+ALPHA=0.0
 TEMPERATURE=288
 GAMMA=1.4
 MU_C=1.0

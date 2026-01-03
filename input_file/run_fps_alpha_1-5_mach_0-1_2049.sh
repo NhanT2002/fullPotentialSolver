@@ -22,4 +22,4 @@ export GASNET_PHYSMEM_MAX='500 GB'
 
 source /project/rrg-laurende-ab/env/CHAMPSenv_2.5.0.sh
 
-/home/hitra/fullPotentialSolver/bin/main -f /home/hitra/fullPotentialSolver/input_file/input_file_fps_2049_alpha_1-5_mach_0-1.txt -nl 1 > /scratch/hitra/output_adaptative_gmres_fps_2049_alpha_1-5_mach_0-1.txt
+/home/hitra/fullPotentialSolver/bin/main -f /home/hitra/fullPotentialSolver/input_file/input_file_fps_2049_alpha_1-5_mach_0-1.txt -nl 1 > /scratch/hitra/output_scale_res/output_scale_res_fps_2049_alpha_1-5_mach_0-1.txt

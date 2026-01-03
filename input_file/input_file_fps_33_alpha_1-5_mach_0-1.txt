@@ -1,6 +1,6 @@
 GRID_FILENAME=/home/hitra/fullPotentialSolver/pre/naca0012_33x33.cgns
 ELEMENT_TYPE=QuadElements
-OUTPUT_FILENAME=/scratch/hitra/output_adaptative_gmres/output_fps_33_alpha_1-5_mach_0-1.cgns
+OUTPUT_FILENAME=/scratch/hitra/output_scale_res/output_fps_33_alpha_1-5_mach_0-1.cgns
 CGNS_OUTPUT_FREQ=10000
 
 MACH=0.1
@@ -20,7 +20,12 @@ IT_MAX=1000000
 CONV_TOL=1e-8
 OMEGA=1.0
 
-LINE_SEARCH=true
+ADAPTIVE_BETA=true
+BETA_START=5e-3
+BETA_FINAL=3e-3
+BETA_THRESHOLD=1e-5
+
+LINE_SEARCH=false
 MAX_LINE_SEARCH=50
 SUFFICIENT_DECREASE=1.1
 

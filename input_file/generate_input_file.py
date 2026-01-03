@@ -6,7 +6,9 @@ alpha_mach_to_str = {
     (0.0, 0.1): 'alpha_0-0_mach_0-1',
     (1.5, 0.1): 'alpha_1-5_mach_0-1',
     (1.5, 0.75): 'alpha_1-5_mach_0-75',
-    (0.0, 0.8): 'alpha_0-0_mach_0-8'
+    (0.0, 0.8): 'alpha_0-0_mach_0-8',
+    (0.0, 0.5): 'alpha_0-0_mach_0-5',
+    (1.5, 0.5): 'alpha_1-5_mach_0-5',
 }
 
 for n in N :
@@ -21,7 +23,7 @@ for n in N :
         content = content.replace('ALPHA=', f'ALPHA={alpha}')
         content = content.replace('MACH=', f'MACH={mach}')
         content = content.replace('OUTPUT_FILENAME=output/output.cgns', 
-                                  f'OUTPUT_FILENAME=/scratch/hitra/output_adaptative_gmres/{output_filename}')
+                                  f'OUTPUT_FILENAME=/scratch/hitra/output_scale_res/{output_filename}')
         with open(filename, 'w') as f :
             f.write(content)
 
@@ -35,7 +37,7 @@ for alpha, mach in alpha_mach :
         content = content.replace(f'/input_{n}.txt', 
                                 f'/home/hitra/fullPotentialSolver/input_file/input_file_fps_{n}_{alpha_mach_str}.txt')
         content = content.replace(f'/output_{n}.txt', 
-                                f'/output_adaptative_gmres_fps_{n}_{alpha_mach_str}.txt')
+                                f'/output_scale_res/output_scale_res_fps_{n}_{alpha_mach_str}.txt')
     
     with open(filename, 'w') as f :
         f.write(content)
@@ -50,7 +52,7 @@ for alpha, mach in alpha_mach :
         content = content.replace(f'/input_{n}.txt', 
                                 f'/home/hitra/fullPotentialSolver/input_file/input_file_fps_{n}_{alpha_mach_str}.txt')
         content = content.replace(f'/output_{n}.txt', 
-                                f'/output_adaptative_gmres_fps_{n}_{alpha_mach_str}.txt')
+                                f'/output_scale_res/output_scale_res_fps_{n}_{alpha_mach_str}.txt')
     
     with open(filename, 'w') as f :
         f.write(content)
