@@ -43,7 +43,7 @@ config const BETA_START : real(64) = 5e-3;    // Initial BETA (strong Jacobian c
 config const BETA_FINAL : real(64) = 0.0;     // Final BETA (pure Newton for quadratic convergence)
 config const BETA_THRESHOLD : real(64) = 1e-4; // Residual threshold to reduce BETA
 
-config const LINE_SEARCH : bool;
+config const LINE_SEARCH : bool = false;
 config const MAX_LINE_SEARCH : int = 5;
 config const SUFFICIENT_DECREASE : real(64) = 1.2;
 

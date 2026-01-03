@@ -7,9 +7,15 @@ MACH=
 ALPHA=
 TEMPERATURE=288
 GAMMA=1.4
-MU_C=1.0
+MU_C=2.0
 BETA=5e-3
 MACH_C=0.95
+
+# Adaptive BETA for quadratic Newton convergence
+ADAPTIVE_BETA=true
+BETA_START=5e-3
+BETA_FINAL=3e-3
+BETA_THRESHOLD=1e-5
 
 X_REF=0.25
 Y_REF=0.0
@@ -20,34 +26,9 @@ IT_MAX=1000000
 CONV_TOL=1e-8
 OMEGA=1.0
 
-ADAPTIVE_BETA=true
-BETA_START=5e-3
-BETA_FINAL=3e-3
-BETA_THRESHOLD=1e-5
-
-LINE_SEARCH=false
-MAX_LINE_SEARCH=50
-SUFFICIENT_DECREASE=1.1
-
-SFD_ENABLED=false
-SFD_CHI=2.0       # Damping coefficient (0.1-1.0 typical)
-SFD_DELTA=1.5     # Filter width parameter (0.01-0.5 typical)
-
-MACH_CONTINUATION=false
-MACH_START=0.5     # Starting Mach number
-MACH_STEP=0.1      # Mach increment per step
-
-USE_NATIVE_GMRES=false
-GMRES_MAXIT=100000
-GMRES_RTOL=1e-1
+GMRES_MAXIT=50
+GMRES_RTOL=1e-3
 GMRES_ATOL=1e-50
 GMRES_DTOL=1e3
 GMRES_RESTART=50
-GMRES_PRECON=lu
-GMRES_PRECON_SIDE=right
-JACOBIAN_TYPE=numerical
-
-ADAPTIVE_GMRES_TOL=false   # Enable adaptive GMRES tolerance
-GMRES_RTOL_MAX=0.5         # Max (loose) tolerance for early iterations  
-GMRES_RTOL_MIN=1e-1        # Min (tight) tolerance for late iterations
-GMRES_RTOL_ETA=0.1         # Eisenstat-Walker eta parameter (0 < eta < 1)
+GMRES_PRECON=ilu
