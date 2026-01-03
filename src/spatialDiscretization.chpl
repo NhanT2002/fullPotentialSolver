@@ -41,7 +41,6 @@ class spatialDiscretization {
     var elemCentroidX_: [elem_dom] real(64);
     var elemCentroidY_: [elem_dom] real(64);
     var elemVolume_: [elem_dom] real(64);
-    var invElemVolume_: [elem_dom] real(64);
     var kuttaCell_: [elem_dom] int; // 1 if over wake, -1 if under wake, 9 otherwise
     var machmach_: [elem_dom] real(64);
     var mumu_: [elem_dom] real(64);
@@ -58,6 +57,7 @@ class spatialDiscretization {
     var deltaSupperTEy_: real(64);
     var deltaSlowerTEx_: real(64);
     var deltaSlowerTEy_: real(64);
+    var res_scale_: real(64);
 
     var face_dom: domain(1) = {1..0};
     var faceCentroidX_: [face_dom] real(64);
@@ -176,8 +176,10 @@ class spatialDiscretization {
                 vol += 0.5 * abs((x1-x2)*(y1+y2) + (x2-cx)*(y2+cy) + (cx-x1)*(cy+y1));
             }
             this.elemVolume_[elem] = vol;
-            this.invElemVolume_[elem] = 1.0 / vol;
         }
+
+        const min_volume = min reduce this.elemVolume_[1..this.nelemDomain_];
+        this.res_scale_ = 1.0 / min_volume; // Used for scaling residuals
 
         // Compute ghost cell centroids by mirroring across boundary faces
         inline proc computeGhostCentroid(face: int) {
@@ -796,7 +798,7 @@ class spatialDiscretization {
 
                 res += sign * this.flux_[face];
             }
-            this.res_[elem] = res * this.invElemVolume_[elem];
+            this.res_[elem] = res * this.res_scale_;
         }
 
         // Kutta condition residual: R_Γ = Γ - Γ_computed
@@ -806,7 +808,7 @@ class spatialDiscretization {
         const phi_upper = this.phi_[this.upperTEelem_] + (this.uu_[this.upperTEelem_] * this.deltaSupperTEx_ + this.vv_[this.upperTEelem_] * this.deltaSupperTEy_);
         const phi_lower = this.phi_[this.lowerTEelem_] + (this.uu_[this.lowerTEelem_] * this.deltaSlowerTEx_ + this.vv_[this.lowerTEelem_] * this.deltaSlowerTEy_);
         const gamma_computed = phi_upper - phi_lower;
-        this.kutta_res_ = (this.circulation_ - gamma_computed) / (this.elemVolume_[this.upperTEelem_] + this.elemVolume_[this.lowerTEelem_]);
+        this.kutta_res_ = (this.circulation_ - gamma_computed) * this.res_scale_;
     }
 
     proc run() {
@@ -916,7 +918,7 @@ class spatialDiscretization {
             gradRhoX[elem-1] = this.gradRhoX_[elem];
             gradRhoY[elem-1] = this.gradRhoY_[elem];
             pp[elem-1] = (this.rhorho_[elem]**this.inputs_.GAMMA_ / (this.inputs_.GAMMA_ * this.inputs_.MACH_ * this.inputs_.MACH_ * this.inputs_.P_INF_) - 1 ) / (this.inputs_.GAMMA_/2*this.inputs_.MACH_**2);
-            resres[elem-1] = abs(this.res_[elem] * this.elemVolume_[elem]);
+            resres[elem-1] = abs(this.res_[elem] / this.res_scale_);
             machmach[elem-1] = this.mach(this.uu_[elem], this.vv_[elem], this.rhorho_[elem]);
             xElem[elem-1] = this.elemCentroidX_[elem];
             yElem[elem-1] = this.elemCentroidY_[elem];
@@ -1044,7 +1046,7 @@ class spatialDiscretization {
             gradRhoX[elem-1] = this.gradRhoX_[elem];
             gradRhoY[elem-1] = this.gradRhoY_[elem];
             pp[elem-1] = (this.rhorho_[elem]**this.inputs_.GAMMA_ / (this.inputs_.GAMMA_ * this.inputs_.MACH_ * this.inputs_.MACH_ * this.inputs_.P_INF_) - 1 ) / (this.inputs_.GAMMA_/2*this.inputs_.MACH_**2);
-            resres[elem-1] = abs(this.res_[elem] * this.elemVolume_[elem]);
+            resres[elem-1] = abs(this.res_[elem] / this.res_scale_);
             machmach[elem-1] = this.mach(this.uu_[elem], this.vv_[elem], this.rhorho_[elem]);
             xElem[elem-1] = this.elemCentroidX_[elem];
             yElem[elem-1] = this.elemCentroidY_[elem];

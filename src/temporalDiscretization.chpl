@@ -557,7 +557,7 @@ class temporalDiscretization {
                     // So the direct term contributes +directCoeff*ρ*A to off-diagonal ALWAYS (no sign)
                     offdiag += directCoeff * area * rhoFace;
                     
-                    this.A_petsc.add(elem-1, neighbor-1, offdiag * this.spatialDisc_.invElemVolume_[elem]);
+                    this.A_petsc.add(elem-1, neighbor-1, offdiag * this.spatialDisc_.res_scale_);
 
                     // === CIRCULATION (Γ) DERIVATIVE ===
                     // flux = 0.5 * (∇φ_elem + ∇φ_neighbor) · m + directCoeff * (φ_neighbor - φ_elem)
@@ -720,12 +720,12 @@ class temporalDiscretization {
             }
             
             // Add diagonal entry
-            this.A_petsc.add(elem-1, elem-1, diag * this.spatialDisc_.invElemVolume_[elem]);
+            this.A_petsc.add(elem-1, elem-1, diag * this.spatialDisc_.res_scale_);
             // Store diag for possible use in upwinding
             this.Jij_[elem] = diag;
             
             // Add dRes/dΓ entry (column for circulation)
-            this.A_petsc.add(elem-1, this.gammaIndex_, dRes_dGamma * this.spatialDisc_.invElemVolume_[elem]);
+            this.A_petsc.add(elem-1, this.gammaIndex_, dRes_dGamma * this.spatialDisc_.res_scale_);
         }
 
         // === BETA-BASED UPWIND AUGMENTATION (element-centric for parallelization) ===
@@ -755,7 +755,7 @@ class temporalDiscretization {
                         if downwindElem == elem {
                             // Use precomputed invL_IJ_ (inverse of cell centroid distance)
                             const increase = this.inputs_.BETA_ * this.spatialDisc_.velMagFace_[face] 
-                            * this.spatialDisc_.invL_IJ_[face] * this.spatialDisc_.invElemVolume_[elem];
+                            * this.spatialDisc_.invL_IJ_[face] * this.spatialDisc_.res_scale_;
                             
                             // Increase absolute value of diagonal term for downwind element
                             const diagTerm = this.Jij_[elem];
@@ -786,12 +786,12 @@ class temporalDiscretization {
         // d(R_Γ)/dφ_lowerTE = +1
         
         // dKutta/dΓ = 1
-        this.A_petsc.add(this.gammaIndex_, this.gammaIndex_, 1.0 / (this.spatialDisc_.elemVolume_[this.spatialDisc_.upperTEelem_] + this.spatialDisc_.elemVolume_[this.spatialDisc_.lowerTEelem_]));
+        this.A_petsc.add(this.gammaIndex_, this.gammaIndex_, 1.0 * this.spatialDisc_.res_scale_);
         
         // dKutta/dφ_upperTE1 = -1.0
-        this.A_petsc.add(this.gammaIndex_, this.spatialDisc_.upperTEelem_ - 1, -1.0 / (this.spatialDisc_.elemVolume_[this.spatialDisc_.upperTEelem_] + this.spatialDisc_.elemVolume_[this.spatialDisc_.lowerTEelem_]));
+        this.A_petsc.add(this.gammaIndex_, this.spatialDisc_.upperTEelem_ - 1, -1.0 * this.spatialDisc_.res_scale_);
         // dKutta/dφ_lowerTE1 = +1.0
-        this.A_petsc.add(this.gammaIndex_, this.spatialDisc_.lowerTEelem_ - 1, 1.0 / (this.spatialDisc_.elemVolume_[this.spatialDisc_.upperTEelem_] + this.spatialDisc_.elemVolume_[this.spatialDisc_.lowerTEelem_]));
+        this.A_petsc.add(this.gammaIndex_, this.spatialDisc_.lowerTEelem_ - 1, 1.0 * this.spatialDisc_.res_scale_);
         
         this.A_petsc.assemblyComplete();
         // this.A_petsc.matView();
@@ -1021,15 +1021,31 @@ class temporalDiscretization {
         // Arrays to store state for line search (backtracking)
         var phi_backup: [1..this.spatialDisc_.nelemDomain_] real(64);
         var circulation_backup: real(64);
-        
-        // // Compute initial residual to check if already converged (useful for Mach continuation)
-        // this.spatialDisc_.run();
-        // res = RMSE(this.spatialDisc_.res_, this.spatialDisc_.elemVolume_);
-        // this.first_res_ = res;
-        // normalized_res = 1.0;
-        // Convergence check: either relative tolerance OR absolute tolerance
-        // The absolute tolerance is important for Mach continuation where the 
-        // initial residual may already be very small
+
+        // Initial residual
+        res = RMSE(this.spatialDisc_.res_, this.spatialDisc_.elemVolume_);
+        if this.inputs_.START_FILENAME_ == "" {
+            this.first_res_ = res;
+        }
+        normalized_res = res / this.first_res_;
+        const res_wall = RMSE(this.spatialDisc_.res_[this.spatialDisc_.wall_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.wall_dom]);
+        const res_fluid = RMSE(this.spatialDisc_.res_[this.spatialDisc_.fluid_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.fluid_dom]);
+        const res_wake = RMSE(this.spatialDisc_.res_[this.spatialDisc_.wake_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.wake_dom]);
+        const res_shock = RMSE(this.spatialDisc_.res_[this.spatialDisc_.shock_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.shock_dom]);
+        const (Cl, Cd, Cm) = this.spatialDisc_.computeAerodynamicCoefficients();
+        const elapsed = this.t0_;
+        writeln(" Time: ", elapsed, " It: ", this.it_,
+                " res: ", res, " norm res: ", normalized_res, " kutta res: ", this.spatialDisc_.kutta_res_,
+                " res wall: ", res_wall, " res fluid: ", res_fluid, " res wake: ", res_wake, " res shock: ", res_shock,
+                " Cl: ", Cl, " Cd: ", Cd, " Cm: ", Cm, " Circulation: ", this.spatialDisc_.circulation_);
+        this.timeList_.pushBack(elapsed);
+        this.itList_.pushBack(this.it_);
+        this.resList_.pushBack(res);
+        this.clList_.pushBack(Cl);
+        this.cdList_.pushBack(Cd);
+        this.cmList_.pushBack(Cm);
+        this.circulationList_.pushBack(this.spatialDisc_.circulation_);
+
         while ((normalized_res > this.inputs_.CONV_TOL_ && res > this.inputs_.CONV_ATOL_) && this.it_ < this.inputs_.IT_MAX_ && isNan(normalized_res) == false) {
             this.it_ += 1;
             time.start();
@@ -1242,10 +1258,6 @@ class temporalDiscretization {
             }
             
             res_prev = res;
-            
-            if this.it_ == 1 {
-                this.first_res_ = res;
-            }
             normalized_res = res / this.first_res_;
 
             const res_wall = RMSE(this.spatialDisc_.res_[this.spatialDisc_.wall_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.wall_dom]);
