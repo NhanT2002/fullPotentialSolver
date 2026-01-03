@@ -5,6 +5,7 @@ import input.potentialInputs;
 use mesh;
 use spatialDiscretization;
 use temporalDiscretization;
+use unsteadySpatialDiscretization;
 use testMetrics;
 use linearAlgebra;
 
@@ -21,6 +22,7 @@ proc main() {
         t_ini.start();
 
         var inputs = new potentialInputs();
+        inputs.initializeFlowField();
         
         // =====================================================================
         // Mach Continuation: solve at progressively higher Mach numbers
@@ -73,11 +75,16 @@ proc main() {
             // Standard single-Mach solve
             var Mesh = new shared MeshData(inputs.GRID_FILENAME_, inputs.ELEMENT_TYPE_);
             Mesh.buildConnectivity();
-            var spatialDisc = new shared spatialDiscretization(Mesh, inputs);
-            var steadySolver = new shared temporalDiscretization(spatialDisc, inputs);
-            
-            steadySolver.initialize();
-            steadySolver.solve();
+            if inputs.FLOW_ == "steady" {
+                var spatialDisc = new shared spatialDiscretization(Mesh, inputs);
+                var steadySolver = new shared temporalDiscretization(spatialDisc, inputs);
+                
+                steadySolver.initialize();
+                steadySolver.solve();
+            }
+            else if inputs.FLOW_ == "unsteady" {
+                var spatialDisc = new shared unsteadySpatialDiscretization(Mesh, inputs);
+            }
         }
 
         t_ini.stop();

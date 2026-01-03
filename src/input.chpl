@@ -1,4 +1,5 @@
 use Math;
+config const FLOW : string = "steady"; // "steady" or "unsteady"
 
 config const GRID_FILENAME : string;
 config const START_FILENAME : string;
@@ -86,6 +87,7 @@ config const CFL_UNSTEADY : real(64);
 config const q_crit : real(64);
 
 record potentialInputs {
+    var FLOW_ : string = FLOW;
     var GRID_FILENAME_: string = GRID_FILENAME;
     var START_FILENAME_: string = START_FILENAME;
     var FREEZE_CIRCULATION_: bool = FREEZE_CIRCULATION;
@@ -185,6 +187,7 @@ record potentialInputs {
     var rho_crit_ = (1.0 + (GAMMA_ - 1)/2 * MACH_ * MACH_ * (1.0 - q_crit * q_crit)) ** (1.0 / (GAMMA_ - 1.0));
 
     proc init() {
+        writeln("Flow type: ", FLOW);
         writeln("GRID_FILENAME = ", GRID_FILENAME);
         writeln("START_FILENAME = ", START_FILENAME);
         writeln("ELEMENT_TYPE = ", ELEMENT_TYPE);
@@ -201,6 +204,27 @@ record potentialInputs {
         writeln("MACH_C = ", MACH_C);
         if MACH_CONTINUATION {
             writeln("MACH_CONTINUATION enabled: ", MACH_START, " -> ", MACH, " (step ", MACH_STEP, ")");
+        }
+    }
+
+    proc ref inputsConfig.initializeFlowField() {
+        if this.FLOW_ == "steady"{
+            this.RHO_INF_ = 1.0;
+            this.VEL_INF_ = 1.0;
+            this.a_INF_ = this.VEL_INF_ / this.MACH_;
+            this.U_INF_ = this.VEL_INF_ * cos(this.ALPHA_ * pi / 180.0);
+            this.V_INF_ = this.VEL_INF_ * sin(this.ALPHA_ * pi / 180.0);
+            this.P_INF_ = this.RHO_INF_ ** this.GAMMA_ / (this.GAMMA_ * this.MACH_ * this.MACH_);
+            this.Q_INF_ = 0.5 * this.RHO_INF_ * this.VEL_INF_ * this.VEL_INF_;
+        }
+        else if this.FLOW_ == "unsteady" {
+            this.RHO_INF_ = 1.0;
+            this.a_INF_ = 1.0;
+            this.VEL_INF_ = this.MACH_ * this.a_INF_;
+            this.U_INF_ = this.VEL_INF_ * cos(this.ALPHA_ * pi / 180.0);
+            this.V_INF_ = this.VEL_INF_ * sin(this.ALPHA_ * pi / 180.0);
+            this.P_INF_ = this.RHO_INF_ * this.a_INF_**2 / this.GAMMA_;
+            this.Q_INF_ = 0.5 * this.RHO_INF_ * this.VEL_INF_ * this.VEL_INF_;
         }
     }
 
