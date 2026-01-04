@@ -106,6 +106,8 @@ class unsteadySpatialDiscretization {
     var lsGradQR_: owned LeastSquaresGradientQR?;
 
     var circulation_ : real(64);
+    var wake_face_dom: domain(1) = {1..0};
+    var wake_face_: [wake_face_dom] int;
 
     var wall_dom: sparse subdomain(elemDomain_dom); // cell next to wall boundary
     var fluid_dom: sparse subdomain(elemDomain_dom); // all other cells without wall_dom
@@ -363,6 +365,7 @@ class unsteadySpatialDiscretization {
 
             }
         }
+        var wake_face_list = new list(int);
         for face in 1..this.nface_ {
             const elem1 = this.mesh_.edge2elem_[1, face];
             const elem2 = this.mesh_.edge2elem_[2, face];
@@ -370,9 +373,17 @@ class unsteadySpatialDiscretization {
                (this.kuttaCell_[elem1] == -1 && this.kuttaCell_[elem2] == 1) ) {
                 this.wake_dom += elem1;
                 this.wake_dom += elem2;
+                wake_face_list.pushBack(face);
             }
         }
-
+        this.wake_face_dom = {1..wake_face_list.size};
+        forall i in this.wake_face_dom {
+            this.wake_face_[i] = wake_face_list[i];
+        }
+        writeln("wake_face = ", this.wake_face_);
+        for face in this.wake_face_ {
+            writeln("Wake face: ", face, " between elems ", this.mesh_.edge2elem_[1, face], " and ", this.mesh_.edge2elem_[2, face]);
+        }
         
 
         this.deltaSupperTEx_ = this.TEnodeXcoord_ - this.elemCentroidX_[this.upperTEelem_];
