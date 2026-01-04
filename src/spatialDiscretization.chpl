@@ -397,6 +397,11 @@ class spatialDiscretization {
                                 this.inputs_.V_INF_ * this.elemCentroidY_[elem];
             }
         }
+
+        this.updateGhostCellsPhi();
+        this.computeVelocityFromPhiLeastSquaresQR();
+        this.computeDensityFromVelocity();
+        this.updateGhostCellsVelocity();
     }
 
     proc updateGhostCellsPhi() {

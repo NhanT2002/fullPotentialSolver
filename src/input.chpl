@@ -207,7 +207,7 @@ record potentialInputs {
         }
     }
 
-    proc ref inputsConfig.initializeFlowField() {
+    proc ref initializeFlowField() {
         if this.FLOW_ == "steady"{
             this.RHO_INF_ = 1.0;
             this.VEL_INF_ = 1.0;
@@ -217,15 +217,15 @@ record potentialInputs {
             this.P_INF_ = this.RHO_INF_ ** this.GAMMA_ / (this.GAMMA_ * this.MACH_ * this.MACH_);
             this.Q_INF_ = 0.5 * this.RHO_INF_ * this.VEL_INF_ * this.VEL_INF_;
         }
-        else if this.FLOW_ == "unsteady" {
-            this.RHO_INF_ = 1.0;
-            this.a_INF_ = 1.0;
-            this.VEL_INF_ = this.MACH_ * this.a_INF_;
-            this.U_INF_ = this.VEL_INF_ * cos(this.ALPHA_ * pi / 180.0);
-            this.V_INF_ = this.VEL_INF_ * sin(this.ALPHA_ * pi / 180.0);
-            this.P_INF_ = this.RHO_INF_ * this.a_INF_**2 / this.GAMMA_;
-            this.Q_INF_ = 0.5 * this.RHO_INF_ * this.VEL_INF_ * this.VEL_INF_;
-        }
+        // else if this.FLOW_ == "unsteady" {
+        //     this.RHO_INF_ = 1.0;
+        //     this.a_INF_ = 1.0;
+        //     this.VEL_INF_ = this.MACH_ * this.a_INF_;
+        //     this.U_INF_ = this.VEL_INF_ * cos(this.ALPHA_ * pi / 180.0);
+        //     this.V_INF_ = this.VEL_INF_ * sin(this.ALPHA_ * pi / 180.0);
+        //     this.P_INF_ = this.RHO_INF_ * this.a_INF_**2 / this.GAMMA_;
+        //     this.Q_INF_ = 0.5 * this.RHO_INF_ * this.VEL_INF_ * this.VEL_INF_;
+        // }
     }
 
     // Update Mach number and recompute derived quantities
