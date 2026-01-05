@@ -39,6 +39,7 @@ proc readSolution(filename) {
     const dsetCd = "/Base/GlobalConvergenceHistory/Cd/ data";
     const dsetCm = "/Base/GlobalConvergenceHistory/Cm/ data";
     const dsetCirculation = "/Base/GlobalConvergenceHistory/Circulation/ data";
+    const dsetWakeGamma = "/WakeBase/wake/WAKE_FLOW_SOLUTION_NC/gammaWake/ data";
 
     var file_id = H5Fopen(filename.c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
     if file_id < 0 then
@@ -55,9 +56,10 @@ proc readSolution(filename) {
     var cd = read1DDataset(real(64), file_id, dsetCd);
     var cm = read1DDataset(real(64), file_id, dsetCm);
     var circulation = read1DDataset(real(64), file_id, dsetCirculation);
+    var wakeGamma = read1DDataset(real(64), file_id, dsetWakeGamma);
 
     H5Fclose(file_id);
-    return (xElem, yElem, rho, phi, it, time, res, cl, cd, cm, circulation);
+    return (xElem, yElem, rho, phi, it, time, res, cl, cd, cm, circulation, wakeGamma);
 }
 
 proc readMesh(filename: string, elementType: string) {

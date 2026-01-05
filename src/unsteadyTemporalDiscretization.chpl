@@ -1,4 +1,4 @@
-module temporalDiscretization
+module unsteadyTemporalDiscretization
 {
 use mesh;
 use writeCGNS;
@@ -6,7 +6,7 @@ use Math;
 use linearAlgebra;
 use Time;
 import input.potentialInputs;
-use spatialDiscretization;
+use unsteadySpatialDiscretization;
 use PETSCapi;
 use C_PETSC;
 use petsc;
@@ -15,135 +15,8 @@ use List;
 use gmres;
 use Sort;
 
-// ============================================================================
-// Jacobian-Vector Product Provider for Matrix-Free Newton-Krylov
-// Uses finite differences: Jv = (R(phi + h*v) - R(phi)) / h (Blazek Eq. 6.62)
-// ============================================================================
-class JacobianVectorProductProvider {
-    var spatialDisc_: shared spatialDiscretization;
-    var n_: int;  // Number of domain elements
-    
-    // State for finite difference computation
-    var phi_current_dom_: domain(1);
-    var phi_current_: [phi_current_dom_] real(64);
-    var gamma_current_: real(64);
-    var R0_: [phi_current_dom_] real(64);
-    var kutta_res0_: real(64);
-    
-    // Temporary storage for perturbed residual
-    var phi_backup_dom_: domain(1);
-    var phi_backup_: [phi_backup_dom_] real(64);
-    
-    // Backup arrays for intermediate quantities (avoid recomputing run() after restore)
-    var uu_backup_: [phi_backup_dom_] real(64);
-    var vv_backup_: [phi_backup_dom_] real(64);
-    var rhorho_backup_: [phi_backup_dom_] real(64);
-    var res_backup_: [phi_backup_dom_] real(64);
-    
-    proc init(spatialDisc: shared spatialDiscretization) {
-        this.spatialDisc_ = spatialDisc;
-        this.n_ = spatialDisc.nelemDomain_;
-        this.phi_current_dom_ = {1..this.n_};
-        this.phi_backup_dom_ = {1..this.n_};
-    }
-    
-    // Store the current state for finite difference computation
-    proc ref setState(const ref phi: [] real(64), gamma: real(64),
-                      const ref R0: [] real(64), kutta_res0: real(64)) {
-        forall i in 1..n_ {
-            this.phi_current_[i] = phi[i];
-            this.R0_[i] = R0[i-1];  // R0 is 0-indexed from GMRES
-        }
-        this.gamma_current_ = gamma;
-        this.kutta_res0_ = kutta_res0;
-    }
-    
-    // Apply the Jacobian-vector product: result = J * v
-    // Uses finite differences: Jv = (R(phi + h*v) - R(phi)) / h
-    proc ref apply(ref result: [] real(64), const ref v: [] real(64)) {
-        // Blazek Eq. 6.63: Step size calculation
-        // h = sqrt(eps) * max(|d|, typ_W * ||W||) * sign(d) / ||v||
-        const eps = 1.0e-14;  // Machine epsilon for float64
-        const sqrtEps = sqrt(eps);
-        const typ_W = 1.0;  // Typical magnitude of solution components
-        
-        // Compute ||v||
-        var vnorm = 0.0;
-        forall i in 0..#n_ with (+ reduce vnorm) {
-            vnorm += v[i] * v[i];
-        }
-        // Include circulation component
-        vnorm += v[n_] * v[n_];
-        vnorm = sqrt(vnorm);
-        
-        // Avoid division by zero
-        if vnorm < 1.0e-30 {
-            forall i in 0..#(n_+1) do result[i] = 0.0;
-            return;
-        }
-        
-        // Compute d = phi · v (dot product with solution)
-        var d = 0.0;
-        forall i in 1..n_ with (+ reduce d) {
-            d += phi_current_[i] * v[i-1];  // v is 0-indexed
-        }
-        // Include circulation contribution
-        d += gamma_current_ * v[n_];
-        
-        // Compute ||phi|| for scaling
-        var phinorm = 0.0;
-        forall i in 1..n_ with (+ reduce phinorm) {
-            phinorm += phi_current_[i] * phi_current_[i];
-        }
-        phinorm += gamma_current_ * gamma_current_;
-        phinorm = sqrt(phinorm);
-        
-        // Step size (Blazek Eq. 6.63)
-        // Use a smaller, more conservative step size for better accuracy
-        var h = 1.0e-8 * max(1.0, phinorm);
-        
-        // Save current spatial discretization state (phi, circulation, and derived quantities)
-        forall i in 1..n_ {
-            phi_backup_[i] = this.spatialDisc_.phi_[i];
-            uu_backup_[i] = this.spatialDisc_.uu_[i];
-            vv_backup_[i] = this.spatialDisc_.vv_[i];
-            rhorho_backup_[i] = this.spatialDisc_.rhorho_[i];
-            res_backup_[i] = this.spatialDisc_.res_[i];
-        }
-        const gamma_backup = this.spatialDisc_.circulation_;
-        const kutta_res_backup = this.spatialDisc_.kutta_res_;
-        
-        // Perturb solution: phi = phi_current + h * v
-        forall i in 1..n_ {
-            this.spatialDisc_.phi_[i] = phi_current_[i] + h * v[i-1];
-        }
-        this.spatialDisc_.circulation_ = gamma_current_ + h * v[n_];
-        
-        // Compute perturbed residual R(phi + h*v) using lightweight run_jv
-        this.spatialDisc_.run_jv();
-        
-        // Finite difference approximation: Jv = (R_perturbed - R0) / h
-        const invH = 1.0 / h;
-        forall i in 0..#n_ {
-            result[i] = (this.spatialDisc_.res_[i+1] - R0_[i+1]) * invH;
-        }
-        result[n_] = (this.spatialDisc_.kutta_res_ - kutta_res0_) * invH;
-        
-        // Restore original spatial discretization state (no need to call run() again!)
-        forall i in 1..n_ {
-            this.spatialDisc_.phi_[i] = phi_backup_[i];
-            this.spatialDisc_.uu_[i] = uu_backup_[i];
-            this.spatialDisc_.vv_[i] = vv_backup_[i];
-            this.spatialDisc_.rhorho_[i] = rhorho_backup_[i];
-            this.spatialDisc_.res_[i] = res_backup_[i];
-        }
-        this.spatialDisc_.circulation_ = gamma_backup;
-        this.spatialDisc_.kutta_res_ = kutta_res_backup;
-    }
-}
-
-class temporalDiscretization {
-    var spatialDisc_: shared spatialDiscretization;
+class unsteadyTemporalDiscretization {
+    var spatialDisc_: shared unsteadySpatialDiscretization;
     var inputs_: potentialInputs;
     var it_: int = 0;
     var t0_: real(64) = 0.0;
@@ -156,17 +29,6 @@ class temporalDiscretization {
     var x_petsc : owned PETSCvector_c;
     var b_petsc : owned PETSCvector_c;
     var ksp : owned PETSCksp_c;
-
-    // Native GMRES solver components
-    var nativeGmres_: GMRESSolver;
-    
-    // Matrix-free Jacobian-vector product provider (must come after nativeGmres_ for init order)
-    var jvpProvider_: owned JacobianVectorProductProvider?;
-    
-    var A_csr_: SparseMatrixCSR;
-    var x_native_dom_: domain(1) = {0..#1};
-    var x_native_: [x_native_dom_] real(64);
-    var b_native_: [x_native_dom_] real(64);
 
     var timeList_ = new list(real(64));
     var itList_ = new list(int);
@@ -183,20 +45,13 @@ class temporalDiscretization {
     var dgradY_dGamma_: [gradSensitivity_dom] real(64);
     var Jij_: [gradSensitivity_dom] real(64);
 
-    // Selective Frequency Damping (SFD) - Jordi et al. 2014 encapsulated formulation
-    // Filters low-frequency oscillations to accelerate convergence
-    // φ_bar is the temporally filtered solution
-    var phi_bar_: [gradSensitivity_dom] real(64);
-    var circulation_bar_: real(64) = 0.0;
-
-    proc init(spatialDisc: shared spatialDiscretization, ref inputs: potentialInputs) {
+    proc init(spatialDisc: shared unsteadySpatialDiscretization, ref inputs: potentialInputs) {
         writeln("Initializing temporal discretization...");
         this.spatialDisc_ = spatialDisc;
         this.inputs_ = inputs;
 
-        // Add 1 extra DOF for circulation Γ
-        const M = spatialDisc.nelemDomain_ + 1;
-        const N = spatialDisc.nelemDomain_ + 1;
+        const M = spatialDisc.nelemDomain_;
+        const N = spatialDisc.nelemDomain_;
         this.gammaIndex_ = spatialDisc.nelemDomain_;  // 0-based index for Γ
         
         this.A_petsc = new owned PETSCmatrix_c(PETSC_COMM_SELF, "seqaij", M, M, N, N);
@@ -205,8 +60,6 @@ class temporalDiscretization {
 
         var nnz : [0..M-1] PetscInt;
         nnz = 4*(this.spatialDisc_.mesh_.elem2edge_[this.spatialDisc_.mesh_.elem2edgeIndex_[1] + 1 .. this.spatialDisc_.mesh_.elem2edgeIndex_[1 + 1]].size + 1);
-        // Γ row has connections to TE cells only
-        nnz[M-1] = 5;
         A_petsc.preAllocate(nnz);
 
         this.ksp = new owned PETSCksp_c(PETSC_COMM_SELF, "gmres");
@@ -238,67 +91,9 @@ class temporalDiscretization {
             writeln("No preconditioner for GMRES");
             this.ksp.setPreconditioner("none");
         }
-
-        // Initialize native GMRES arrays (must come before gradSensitivity_dom for field order)
-        if this.inputs_.USE_NATIVE_GMRES_ {
-            writeln("Using native Chapel GMRES solver");
-            this.x_native_dom_ = {0..#N};
-        }
         
         // Initialize gradient sensitivity arrays
         this.gradSensitivity_dom = {1..spatialDisc.nelemDomain_};
-
-        // Initialize native GMRES solver (after other fields)
-        if this.inputs_.USE_NATIVE_GMRES_ {
-            // Determine preconditioner type
-            var preconType = PreconditionerType.None;
-            if this.inputs_.GMRES_PRECON_ == "jacobi" {
-                writeln("Using Jacobi preconditioner for native GMRES");
-                preconType = PreconditionerType.Jacobi;
-            } else if this.inputs_.GMRES_PRECON_ == "ilu" {
-                writeln("Using ILU(0) preconditioner for native GMRES");
-                preconType = PreconditionerType.ILU0;
-            } else {
-                writeln("Using no preconditioner for native GMRES");
-            }
-            
-            // Determine preconditioning side
-            var preconSide = PreconSide.Right;
-            if this.inputs_.GMRES_PRECON_SIDE_ == "left" {
-                writeln("Using LEFT preconditioning (preconditioned residual)");
-                preconSide = PreconSide.Left;
-            } else {
-                writeln("Using RIGHT preconditioning (true residual)");
-                preconSide = PreconSide.Right;
-            }
-            
-            // Print Jacobian type
-            if this.inputs_.JACOBIAN_TYPE_ == "numerical" {
-                writeln("Using NUMERICAL (matrix-free) Jacobian via finite differences (Blazek Eq. 6.62)");
-            } else {
-                writeln("Using ANALYTICAL Jacobian");
-            }
-            
-            this.nativeGmres_ = new GMRESSolver(
-                N, 
-                inputs.GMRES_RESTART_,
-                inputs.GMRES_MAXIT_,
-                inputs.GMRES_RTOL_,
-                inputs.GMRES_ATOL_,
-                preconType,
-                preconSide
-            );
-            
-            // Initialize JVP provider if numerical Jacobian (after nativeGmres_ for field order)
-            if this.inputs_.JACOBIAN_TYPE_ == "numerical" {
-                this.jvpProvider_ = new owned JacobianVectorProductProvider(spatialDisc);
-            }
-        }
-
-        // Print SFD status
-        if this.inputs_.SFD_ENABLED_ {
-            writeln("SFD enabled: χ = ", this.inputs_.SFD_CHI_, ", Δ = ", this.inputs_.SFD_DELTA_);
-        }
     }
 
     proc initializeJacobian() {
@@ -313,18 +108,7 @@ class temporalDiscretization {
                     this.A_petsc.set(elem-1, neighbor-1, 0.0);
                 }
             }
-            // Initialize dRes_i/dΓ column entries for wake-adjacent cells
-            this.A_petsc.set(elem-1, this.gammaIndex_, 0.0);
         }
-        
-        // Initialize Γ row (Kutta condition): Γ - (φ_upper - φ_lower) = 0
-        // dKutta/dΓ = 1
-        this.A_petsc.set(this.gammaIndex_, this.gammaIndex_, 0.0);
-        // dKutta/dφ_upperTE = -1
-        this.A_petsc.set(this.gammaIndex_, this.spatialDisc_.upperTEelem_ - 1, 0.0);
-        // dKutta/dφ_lowerTE = +1
-        this.A_petsc.set(this.gammaIndex_, this.spatialDisc_.lowerTEelem_ - 1, 0.0);
-
         this.A_petsc.assemblyComplete();
         // this.A_petsc.matView();
     }
@@ -630,44 +414,8 @@ class temporalDiscretization {
                     //     }
                     // }
                     
-                    this.A_petsc.add(elem-1, neighbor-1, offdiag * this.spatialDisc_.res_scale_);
+                    this.A_petsc.add(elem-1, neighbor-1, offdiag);
 
-                    // === CIRCULATION (Γ) DERIVATIVE ===
-                    // flux = 0.5 * (∇φ_elem + ∇φ_neighbor) · m + directCoeff * (φ_neighbor - φ_elem)
-                    // ∂flux/∂Γ = 0.5 * (∂∇φ_elem/∂Γ + ∂∇φ_neighbor/∂Γ) · m + ∂(direct)/∂Γ
-                    //
-                    // The gradient sensitivities are precomputed for ALL cells, capturing
-                    // contributions from ALL their wake-crossing faces (not just this face).
-                    // This ensures correct Jacobian even for faces that are not themselves
-                    // wake-crossing but whose cells have wake-crossing neighbors.
-
-                    // Contribution from elem's gradient sensitivity
-                    const dgradX_elem = this.dgradX_dGamma_[elem];
-                    const dgradY_elem = this.dgradY_dGamma_[elem];
-                    var dFlux_dGamma = 0.5 * (dgradX_elem * mx + dgradY_elem * my);
-
-                    // Contribution from neighbor's gradient sensitivity
-                    const dgradX_neighbor = this.dgradX_dGamma_[neighbor];
-                    const dgradY_neighbor = this.dgradY_dGamma_[neighbor];
-                    dFlux_dGamma += 0.5 * (dgradX_neighbor * mx + dgradY_neighbor * my);
-
-                    // Apply sign and area
-                    dFlux_dGamma *= sign * area * rhoFace;
-
-                    // Direct term: only for wake-crossing faces
-                    // directCoeff * ((φ_neighbor ± Γ) - φ_elem)
-                    // ∂/∂Γ = ±directCoeff (sign depends on which side of wake)
-                    if isWakeCrossingFace {
-                        var gammaSgn = 0.0;
-                        if kuttaType_elem == 1 && kuttaType_neighbor == -1 {
-                            gammaSgn = 1.0;  // elem above, neighbor below: +Γ
-                        } else {
-                            gammaSgn = -1.0; // elem below, neighbor above: -Γ
-                        }
-                        dFlux_dGamma += directCoeff * area * rhoFace * gammaSgn;
-                    }
-
-                    dRes_dGamma += dFlux_dGamma;
 
                 } else if isWallFace {
                     // === WALL BOUNDARY FACE ===
@@ -730,15 +478,6 @@ class temporalDiscretization {
                     //     diag += sign * densityRetardationContrib;
                     // }
 
-                    // === CIRCULATION (Γ) DERIVATIVE FOR WALL FACES ===
-                    // Wall flux = V_int · m_wall * A, where V_int = ∇φ_int
-                    // If the interior cell has wake-crossing faces, ∇φ_int depends on Γ
-                    // ∂flux/∂Γ = (∂∇φ_int/∂Γ · m_wall) * A
-                    const dgradX_elem = this.dgradX_dGamma_[elem];
-                    const dgradY_elem = this.dgradY_dGamma_[elem];
-                    const dFlux_dGamma_wall = (dgradX_elem * mWallX + dgradY_elem * mWallY) * sign * area * rhoFace;
-                    dRes_dGamma += dFlux_dGamma_wall;
-
                 } else {
                     // === FARFIELD BOUNDARY FACE ===
                     // Farfield BC: phi_ghost = U_inf*x + V_inf*y (Dirichlet, fixed)
@@ -770,12 +509,9 @@ class temporalDiscretization {
             }
             
             // Add diagonal entry
-            this.A_petsc.add(elem-1, elem-1, diag * this.spatialDisc_.res_scale_);
+            this.A_petsc.add(elem-1, elem-1, diag);
             // Store diag for possible use in upwinding
             this.Jij_[elem] = diag;
-            
-            // Add dRes/dΓ entry (column for circulation)
-            this.A_petsc.add(elem-1, this.gammaIndex_, dRes_dGamma * this.spatialDisc_.res_scale_);
         }
 
         // === BETA-BASED UPWIND AUGMENTATION (element-centric for parallelization) ===
@@ -805,7 +541,7 @@ class temporalDiscretization {
                         if downwindElem == elem {
                             // Use precomputed invL_IJ_ (inverse of cell centroid distance)
                             const increase = this.inputs_.BETA_ * this.spatialDisc_.velMagFace_[face] 
-                            * this.spatialDisc_.invL_IJ_[face] * this.spatialDisc_.res_scale_;
+                            * this.spatialDisc_.invL_IJ_[face];
                             
                             // Increase absolute value of diagonal term for downwind element
                             const diagTerm = this.Jij_[elem];
@@ -823,149 +559,8 @@ class temporalDiscretization {
                 }
             }
         }
-        
-        // === KUTTA CONDITION ROW ===
-        // Γ - (φ_upper,TE - φ_lower,TE) = 0
-        // Currently, circulation is computed as:
-        //   Γ = φ_upper + V_upper·Δs - [φ_lower + V_lower·Δs]
-        // Simplified for linearization: Γ ≈ φ_upper - φ_lower (main cells)
-        //
-        // Kutta residual: R_Γ = Γ - (φ_upperTE - φ_lowerTE)
-        // d(R_Γ)/dΓ = 1
-        // d(R_Γ)/dφ_upperTE = -1
-        // d(R_Γ)/dφ_lowerTE = +1
-        
-        // dKutta/dΓ = 1
-        this.A_petsc.add(this.gammaIndex_, this.gammaIndex_, 1.0 * this.spatialDisc_.res_scale_);
-        
-        // dKutta/dφ_upperTE1 = -1.0
-        this.A_petsc.add(this.gammaIndex_, this.spatialDisc_.upperTEelem_ - 1, -1.0 * this.spatialDisc_.res_scale_);
-        // dKutta/dφ_lowerTE1 = +1.0
-        this.A_petsc.add(this.gammaIndex_, this.spatialDisc_.lowerTEelem_ - 1, 1.0 * this.spatialDisc_.res_scale_);
-        
         this.A_petsc.assemblyComplete();
         // this.A_petsc.matView();
-        
-        // Extract CSR matrix for native GMRES if enabled
-        if this.inputs_.USE_NATIVE_GMRES_ {
-            this.extractCSRFromPETSc();
-            this.nativeGmres_.setupPreconditioner(this.A_csr_);
-        }
-    }
-    
-    // Build CSR sparsity pattern from mesh connectivity (call once during init)
-    proc buildCSRSparsityPattern() {
-        const n = this.spatialDisc_.nelemDomain_ + 1;
-        
-        // Count non-zeros per row based on mesh connectivity
-        var nnzPerRow: [0..#n] int;
-        
-        for elem in 1..this.spatialDisc_.nelemDomain_ {
-            // Diagonal
-            var count = 1;
-            // Neighbors
-            const faces = this.spatialDisc_.mesh_.elem2edge_[
-                this.spatialDisc_.mesh_.elem2edgeIndex_[elem] + 1 .. 
-                this.spatialDisc_.mesh_.elem2edgeIndex_[elem + 1]];
-            for face in faces {
-                const elem1 = this.spatialDisc_.mesh_.edge2elem_[1, face];
-                const elem2 = this.spatialDisc_.mesh_.edge2elem_[2, face];
-                const neighbor = if elem1 == elem then elem2 else elem1;
-                if neighbor <= this.spatialDisc_.nelemDomain_ {
-                    count += 1;
-                }
-            }
-            // Connection to circulation
-            count += 1;
-            nnzPerRow[elem-1] = count;
-        }
-        // Last row (Kutta condition): connected to Γ, upper TE, lower TE
-        nnzPerRow[n-1] = 5;
-        
-        // Total non-zeros
-        var totalNnz = 0;
-        for i in 0..#n do totalNnz += nnzPerRow[i];
-        
-        // Initialize CSR structure
-        this.A_csr_ = new SparseMatrixCSR(n, totalNnz);
-        
-        // Build row pointers
-        var k = 0;
-        for i in 0..#n {
-            this.A_csr_.rowPtr[i] = k;
-            k += nnzPerRow[i];
-        }
-        this.A_csr_.rowPtr[n] = k;
-        
-        // Build column indices (sorted order within each row)
-        for elem in 1..this.spatialDisc_.nelemDomain_ {
-            const row = elem - 1;
-            var cols: [0..#nnzPerRow[row]] int;
-            var idx = 0;
-            
-            // Collect all column indices
-            cols[idx] = row;  // diagonal
-            idx += 1;
-            
-            const faces = this.spatialDisc_.mesh_.elem2edge_[
-                this.spatialDisc_.mesh_.elem2edgeIndex_[elem] + 1 .. 
-                this.spatialDisc_.mesh_.elem2edgeIndex_[elem + 1]];
-            for face in faces {
-                const elem1 = this.spatialDisc_.mesh_.edge2elem_[1, face];
-                const elem2 = this.spatialDisc_.mesh_.edge2elem_[2, face];
-                const neighbor = if elem1 == elem then elem2 else elem1;
-                if neighbor <= this.spatialDisc_.nelemDomain_ {
-                    cols[idx] = neighbor - 1;
-                    idx += 1;
-                }
-            }
-            // Connection to circulation (last column)
-            cols[idx] = n - 1;
-            idx += 1;
-            
-            // Sort columns
-            sort(cols);
-            
-            // Copy to CSR
-            const rowStart = this.A_csr_.rowPtr[row];
-            for i in 0..#idx {
-                this.A_csr_.colIdx[rowStart + i] = cols[i];
-            }
-        }
-        
-        // Last row (Kutta): Γ, upper TE, lower TE
-        const gammaRow = n - 1;
-        const rowStart = this.A_csr_.rowPtr[gammaRow];
-        var kuttaCols: [0..#5] int;
-        kuttaCols[0] = this.spatialDisc_.lowerTEelem_ - 1;
-        kuttaCols[1] = this.spatialDisc_.upperTEelem_ - 1;
-        kuttaCols[2] = gammaRow;  // diagonal
-        // Note: actual nnz might be less, just use what's needed
-        sort(kuttaCols[0..2]);
-        for i in 0..2 {
-            this.A_csr_.colIdx[rowStart + i] = kuttaCols[i];
-        }
-        // Pad remaining
-        for i in 3..4 {
-            this.A_csr_.colIdx[rowStart + i] = gammaRow;
-        }
-        
-        this.A_csr_.buildDiagonalIndex();
-    }
-    
-    // Update CSR values from PETSc matrix (called each iteration)
-    proc extractCSRFromPETSc() {
-        const n = this.spatialDisc_.nelemDomain_ + 1;
-        
-        // Copy values using known sparsity pattern
-        for i in 0..#n {
-            const rowStart = this.A_csr_.rowPtr[i];
-            const rowEnd = this.A_csr_.rowPtr[i + 1];
-            for k in rowStart..rowEnd-1 {
-                const j = this.A_csr_.colIdx[k];
-                this.A_csr_.values[k] = this.A_petsc.get(i, j);
-            }
-        }
     }
 
     proc initialize() {
@@ -976,37 +571,24 @@ class temporalDiscretization {
         this.initializeJacobian();
         this.computeGradientSensitivity();
         
-        // Build CSR sparsity pattern for native GMRES (must be after initializeJacobian)
-        if this.inputs_.USE_NATIVE_GMRES_ {
-            this.buildCSRSparsityPattern();
-        }
-        
         this.computeJacobian();
 
-        // Initialize SFD filtered state to initial solution
-        if this.inputs_.SFD_ENABLED_ {
-            forall elem in 1..this.spatialDisc_.nelemDomain_ {
-                this.phi_bar_[elem] = this.spatialDisc_.phi_[elem];
-            }
-            this.circulation_bar_ = this.spatialDisc_.circulation_;
-        }
-
-        if this.inputs_.START_FILENAME_ != "" {
-            writeln("Initializing solution from file: ", this.inputs_.START_FILENAME_);
-            const (xElem, yElem, rho, phi, it, time, res, cl, cd, cm, circulation, wakeGamma) = readSolution(this.inputs_.START_FILENAME_);
-            for i in it.domain {
-                this.timeList_.pushBack(time[i]);
-                this.itList_.pushBack(it[i]);
-                this.resList_.pushBack(res[i]);
-                this.clList_.pushBack(cl[i]);
-                this.cdList_.pushBack(cd[i]);
-                this.cmList_.pushBack(cm[i]);
-                this.circulationList_.pushBack(circulation[i]);
-            }
-            this.it_ = it.last;
-            this.t0_ = time.last;
-            this.first_res_ = res.first;
-        }
+        // if this.inputs_.START_FILENAME_ != "" {
+        //     writeln("Initializing solution from file: ", this.inputs_.START_FILENAME_);
+        //     const (xElem, yElem, rho, phi, it, time, res, cl, cd, cm, circulation, wakeGamma) = readSolution(this.inputs_.START_FILENAME_);
+        //     for i in it.domain {
+        //         this.timeList_.pushBack(time[i]);
+        //         this.itList_.pushBack(it[i]);
+        //         this.resList_.pushBack(res[i]);
+        //         this.clList_.pushBack(cl[i]);
+        //         this.cdList_.pushBack(cd[i]);
+        //         this.cmList_.pushBack(cm[i]);
+        //         this.circulationList_.pushBack(circulation[i]);
+        //     }
+        //     this.it_ = it.last;
+        //     this.t0_ = time.last;
+        //     this.first_res_ = res.first;
+        // }
 
         // Reset adaptive upwinding state for new Mach number
         this.inputs_.upwindAdapted_ = false;
@@ -1021,41 +603,6 @@ class temporalDiscretization {
         if this.inputs_.ADAPTIVE_BETA_ {
             this.inputs_.BETA_ = this.inputs_.BETA_START_;
             writeln("  >>> Adaptive BETA: starting with BETA=", this.inputs_.BETA_);
-        }
-    }
-
-    // Reset solver state for Mach continuation (keeps current solution as initial guess)
-    // newInputs should have the updated Mach number and derived quantities
-    proc resetForContinuation(ref newInputs: potentialInputs) {
-        this.it_ = 0;
-        
-        // Update the inputs record in this class and in spatialDiscretization
-        this.inputs_ = newInputs;
-        this.spatialDisc_.updateInputs(newInputs);
-        
-        // Reset adaptive upwinding state for new Mach number
-        this.inputs_.upwindAdapted_ = false;
-        if this.inputs_.ADAPTIVE_UPWIND_ {
-            this.inputs_.MU_C_ = this.inputs_.MU_C_START_;
-            this.inputs_.MACH_C_ = this.inputs_.MACH_C_START_;
-        }
-        
-        // Reset adaptive BETA state for new Mach number
-        this.inputs_.betaAdapted_ = false;
-        if this.inputs_.ADAPTIVE_BETA_ {
-            this.inputs_.BETA_ = this.inputs_.BETA_START_;
-        }
-        
-        // Recompute Jacobian sparsity pattern (in case it changed, though typically it doesn't)
-        this.computeGradientSensitivity();
-        this.computeJacobian();
-
-        // Reset SFD filtered state to current solution
-        if this.inputs_.SFD_ENABLED_ {
-            forall elem in 1..this.spatialDisc_.nelemDomain_ {
-                this.phi_bar_[elem] = this.spatialDisc_.phi_[elem];
-            }
-            this.circulation_bar_ = this.spatialDisc_.circulation_;
         }
     }
 
@@ -1074,9 +621,7 @@ class temporalDiscretization {
 
         // Initial residual
         res = RMSE(this.spatialDisc_.res_, this.spatialDisc_.elemVolume_);
-        if this.inputs_.START_FILENAME_ == "" {
-            this.first_res_ = res;
-        }
+        this.first_res_ = res;
         normalized_res = res / this.first_res_;
         const res_wall = RMSE(this.spatialDisc_.res_[this.spatialDisc_.wall_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.wall_dom]);
         const res_fluid = RMSE(this.spatialDisc_.res_[this.spatialDisc_.fluid_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.fluid_dom]);
@@ -1129,91 +674,10 @@ class temporalDiscretization {
             forall elem in 1..this.spatialDisc_.nelemDomain_ {
                 this.b_petsc.set(elem-1, -this.spatialDisc_.res_[elem]);
             }
-            this.b_petsc.set(this.gammaIndex_, -this.spatialDisc_.kutta_res_);
             this.b_petsc.assemblyComplete();
 
-            var its: int;
-            var reason: int;
-            
-            // === ADAPTIVE (INEXACT) NEWTON: Eisenstat-Walker forcing terms ===
-            // Idea: Use loose inner tolerance early (save GMRES iterations), 
-            //       tighten as outer residual decreases for quadratic convergence
-            // Reference: Eisenstat & Walker, SIAM J. Sci. Comput. 17(1), 1996
-            var current_rtol = this.inputs_.GMRES_RTOL_;
-            if this.inputs_.ADAPTIVE_GMRES_TOL_ && normalized_res < 1e12 {
-                // Eisenstat-Walker Choice 1: eta_k = |r_k - r_{k-1}| / |r_{k-1}|
-                // Simplified version: eta = eta_max * (res / first_res)^gamma
-                // This gives loose tolerance early and tight tolerance near convergence
-                const eta = this.inputs_.GMRES_RTOL_ETA_;
-                current_rtol = max(this.inputs_.GMRES_RTOL_MIN_,
-                                   min(this.inputs_.GMRES_RTOL_MAX_, 
-                                       eta * normalized_res));
-                // Update tolerances in solvers
-                if this.inputs_.USE_NATIVE_GMRES_ {
-                    this.nativeGmres_.setTolerance(current_rtol, this.inputs_.GMRES_ATOL_);
-                } else {
-                    this.ksp.setTolerances(current_rtol, this.inputs_.GMRES_ATOL_, 
-                                          this.inputs_.GMRES_DTOL_, this.inputs_.GMRES_MAXIT_);
-                }
-            }
-
-            if this.inputs_.USE_NATIVE_GMRES_ {
-                // === NATIVE CHAPEL GMRES ===
-                const nDOF = this.spatialDisc_.nelemDomain_ + 1;
-                
-                // Copy RHS to native arrays
-                forall i in 0..#nDOF {
-                    this.b_native_[i] = this.b_petsc.get(i);
-                    this.x_native_[i] = 0.0;  // Zero initial guess
-                }
-                
-                if this.inputs_.JACOBIAN_TYPE_ == "numerical" && this.jvpProvider_ != nil {
-                    // === MATRIX-FREE NUMERICAL JACOBIAN ===
-                    // Store current residual R(phi) for finite difference
-                    var R0_native: [0..#this.spatialDisc_.nelemDomain_] real(64);
-                    forall i in 0..#this.spatialDisc_.nelemDomain_ {
-                        R0_native[i] = this.spatialDisc_.res_[i+1];
-                    }
-                    
-                    // Borrow the JVP provider
-                    var jvp: borrowed JacobianVectorProductProvider = this.jvpProvider_!.borrow();
-                    
-                    // Set state in JVP provider
-                    jvp.setState(
-                        this.spatialDisc_.phi_, 
-                        this.spatialDisc_.circulation_,
-                        R0_native, 
-                        this.spatialDisc_.kutta_res_
-                    );
-                    
-                    // Always extract CSR and update preconditioner
-                    this.extractCSRFromPETSc();
-                    
-                    const (nativeIts, nativeReason) = this.nativeGmres_.solveMatrixFreeRight(
-                        this.A_csr_, this.x_native_, this.b_native_,
-                        jvp, true
-                    );
-                    its = nativeIts;
-                    reason = nativeReason : int;
-                } else {
-                    // === ANALYTICAL JACOBIAN (standard matrix-based) ===
-                    this.extractCSRFromPETSc();
-                    const (nativeIts, nativeReason) = this.nativeGmres_.solve(this.A_csr_, this.x_native_, this.b_native_, true);
-                    its = nativeIts;
-                    reason = nativeReason : int;
-                }
-                
-                // Copy solution back to PETSc vector for line search compatibility
-                forall i in 0..#nDOF {
-                    this.x_petsc.set(i, this.x_native_[i]);
-                }
-                this.x_petsc.assemblyComplete();
-            } else {
-                // === PETSC GMRES ===
-                const (petscIts, petscReason) = GMRES(this.ksp, this.A_petsc, this.b_petsc, this.x_petsc);
-                its = petscIts;
-                reason = petscReason;
-            }
+            // === PETSC GMRES ===
+            const (its, reason) = GMRES(this.ksp, this.A_petsc, this.b_petsc, this.x_petsc);
             
             var lineSearchIts = 0;
             omega = this.inputs_.OMEGA_;
@@ -1235,9 +699,9 @@ class temporalDiscretization {
                     forall elem in 1..this.spatialDisc_.nelemDomain_ {
                         this.spatialDisc_.phi_[elem] = phi_backup[elem] + omega * this.x_petsc.get(elem-1);
                     }
-                    this.spatialDisc_.circulation_ = circulation_backup + omega * this.x_petsc.get(this.gammaIndex_);
                     
                     // Compute new residual
+                    this.spatialDisc_.wakeFaceGamma_ = this.spatialDisc_.circulation_;
                     this.spatialDisc_.run();
                     res = RMSE(this.spatialDisc_.res_, this.spatialDisc_.elemVolume_);
                     
@@ -1259,50 +723,9 @@ class temporalDiscretization {
                 forall elem in 1..this.spatialDisc_.nelemDomain_ {
                     this.spatialDisc_.phi_[elem] += omega * this.x_petsc.get(elem-1);
                 }
-                this.spatialDisc_.circulation_ += omega * this.x_petsc.get(this.gammaIndex_);
+                this.spatialDisc_.wakeFaceGamma_ = this.spatialDisc_.circulation_;
                 
                 // Compute residual for convergence check
-                this.spatialDisc_.run();
-                res = RMSE(this.spatialDisc_.res_, this.spatialDisc_.elemVolume_);
-            }
-
-            // === SELECTIVE FREQUENCY DAMPING (SFD) ===
-            if this.inputs_.SFD_ENABLED_ {
-                const chi = this.inputs_.SFD_CHI_;
-                const delta = this.inputs_.SFD_DELTA_;
-                const dt = 1.0;  // One Newton iteration = one time unit
-                
-                // Compute the exponential factor E = exp(-(χ + 1/Δ)·Δt)
-                const exponent = -(chi + 1.0/delta) * dt;
-                const E = exp(exponent);
-                
-                // Matrix exponential coefficients from Jordi Eq. (9)
-                const scale = 1.0 / (1.0 + chi * delta);
-                const M11 = scale * (1.0 + chi * delta * E);        // coefficient for q from q*
-                const M12 = scale * chi * delta * (1.0 - E);        // coefficient for q from q̄
-                const M21 = scale * (1.0 - E);                      // coefficient for q̄ from q*
-                const M22 = scale * (chi * delta + E);              // coefficient for q̄ from q̄
-                
-                // Apply matrix exponential to (φ*, φ̄) where φ* = Φ(φ^n) is Newton result
-                forall elem in 1..this.spatialDisc_.nelemDomain_ {
-                    const phi_star = this.spatialDisc_.phi_[elem];  // Result from Newton (Φ(q^n))
-                    const phi_bar = this.phi_bar_[elem];            // Previous filtered state
-                    
-                    // Apply encapsulated SFD transform
-                    const phi_new = M11 * phi_star + M12 * phi_bar;
-                    const phi_bar_new = M21 * phi_star + M22 * phi_bar;
-                    
-                    this.spatialDisc_.phi_[elem] = phi_new;
-                    this.phi_bar_[elem] = phi_bar_new;
-                }
-                
-                // Apply same transform to circulation
-                const gamma_star = this.spatialDisc_.circulation_;
-                const gamma_bar = this.circulation_bar_;
-                this.spatialDisc_.circulation_ = M11 * gamma_star + M12 * gamma_bar;
-                this.circulation_bar_ = M21 * gamma_star + M22 * gamma_bar;
-
-                // Recompute residual after SFD modification
                 this.spatialDisc_.run();
                 res = RMSE(this.spatialDisc_.res_, this.spatialDisc_.elemVolume_);
             }
@@ -1318,20 +741,12 @@ class temporalDiscretization {
             const (Cl, Cd, Cm) = this.spatialDisc_.computeAerodynamicCoefficients();
             time.stop();
             const elapsed = time.elapsed() + this.t0_;
-            if this.inputs_.ADAPTIVE_GMRES_TOL_ {
-                writeln(" Time: ", elapsed, " It: ", this.it_,
-                        " res: ", res, " norm res: ", normalized_res, " kutta res: ", this.spatialDisc_.kutta_res_,
-                        " res wall: ", res_wall, " res fluid: ", res_fluid, " res wake: ", res_wake, " res shock: ", res_shock,
-                        " Cl: ", Cl, " Cd: ", Cd, " Cm: ", Cm, " Circulation: ", this.spatialDisc_.circulation_,
-                        " GMRES its: ", its, " reason: ", reason, " omega: ", omega, " LS its: ", lineSearchIts,
-                        " GMRES rtol: ", current_rtol);
-            } else {
-                writeln(" Time: ", elapsed, " It: ", this.it_,
-                        " res: ", res, " norm res: ", normalized_res, " kutta res: ", this.spatialDisc_.kutta_res_,
-                        " res wall: ", res_wall, " res fluid: ", res_fluid, " res wake: ", res_wake, " res shock: ", res_shock,
-                        " Cl: ", Cl, " Cd: ", Cd, " Cm: ", Cm, " Circulation: ", this.spatialDisc_.circulation_,
-                        " GMRES its: ", its, " reason: ", reason, " omega: ", omega, " LS its: ", lineSearchIts);
-            }
+            writeln(" Time: ", elapsed, " It: ", this.it_,
+                    " res: ", res, " norm res: ", normalized_res, " kutta res: ", this.spatialDisc_.kutta_res_,
+                    " res wall: ", res_wall, " res fluid: ", res_fluid, " res wake: ", res_wake, " res shock: ", res_shock,
+                    " Cl: ", Cl, " Cd: ", Cd, " Cm: ", Cm, " Circulation: ", this.spatialDisc_.circulation_,
+                    " GMRES its: ", its, " reason: ", reason, " omega: ", omega, " LS its: ", lineSearchIts);
+            
 
             this.timeList_.pushBack(elapsed);
             this.itList_.pushBack(this.it_);

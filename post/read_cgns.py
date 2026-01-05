@@ -24,6 +24,10 @@ def readCGNS(filename) :
         VelocityY_wall = f['WallBase/wall/WALL_FLOW_SOLUTION_CC/vWall/ data'][:]
         Cp = f['WallBase/wall/WALL_FLOW_SOLUTION_CC/cpWall/ data'][:]
 
+        xWake = f['WakeBase/wake/WAKE_FLOW_SOLUTION_NC/xWake/ data'][:]
+        yWake = f['WakeBase/wake/WAKE_FLOW_SOLUTION_NC/yWake/ data'][:]
+        gammaWake = f['WakeBase/wake/WAKE_FLOW_SOLUTION_NC/gammaWake/ data'][:]
+
         it = f['Base/GlobalConvergenceHistory/IterationCounters/ data'][:]
         time = f['Base/GlobalConvergenceHistory/Time/ data'][:]
         res = f['Base/GlobalConvergenceHistory/Residual/ data'][:]
@@ -61,6 +65,10 @@ def readCGNS(filename) :
         data['cm'] = cm
         data['circulation'] = circulation
 
+        data['xWake'] = xWake
+        data['yWake'] = yWake
+        data['gammaWake'] = gammaWake
+
         return data
 
 def readHSPM(filename) :
@@ -74,9 +82,9 @@ def readHSPM(filename) :
             'Y_wall': y,
             'Cp_wall': cp}
 
-data = readCGNS("../output/output_729.cgns")
-data2 = readCGNS("../output/output_730.cgns")
-data3 = readCGNS("../output/output_730.cgns")
+data = readCGNS("../output/output_868.cgns")
+data2 = readCGNS("../output/output_867.cgns")
+data3 = readCGNS("../output/output_879.cgns")
 
 data_hspm = readHSPM("../output/HSPM_naca0012_A1-25.dat")
 

@@ -13,7 +13,7 @@ use Sort;
 use leastSquaresGradient;
 import input.potentialInputs;
 
-config const elemID : int = 0;   // Element index for debugging purposes
+// config const elemID : int = 0;   // Element index for debugging purposes
 
 class spatialDiscretization {
     var mesh_: shared MeshData;
@@ -95,6 +95,13 @@ class spatialDiscretization {
     var lsGradQR_: owned LeastSquaresGradientQR?;
 
     var circulation_ : real(64);
+    var wake_face_dom: domain(1) = {1..0};
+    var wakeFace_: [wake_face_dom] int;
+    var wakeFace2index_: map(int, int);
+    var wakeFaceX_: [wake_face_dom] real(64);
+    var wakeFaceY_: [wake_face_dom] real(64);
+    var wakeFaceZ_: [wake_face_dom] real(64);
+    var wakeFaceGamma_: [wake_face_dom] real(64);
 
     var wall_dom: sparse subdomain(elemDomain_dom); // cell next to wall boundary
     var fluid_dom: sparse subdomain(elemDomain_dom); // all other cells without wall_dom
@@ -352,6 +359,7 @@ class spatialDiscretization {
 
             }
         }
+        var wake_face_list = new list((real(64), int));
         for face in 1..this.nface_ {
             const elem1 = this.mesh_.edge2elem_[1, face];
             const elem2 = this.mesh_.edge2elem_[2, face];
@@ -359,9 +367,19 @@ class spatialDiscretization {
                (this.kuttaCell_[elem1] == -1 && this.kuttaCell_[elem2] == 1) ) {
                 this.wake_dom += elem1;
                 this.wake_dom += elem2;
+                wake_face_list.pushBack((this.faceCentroidX_[face], face));
             }
         }
-
+        sort(wake_face_list);
+        this.wake_face_dom = {1..wake_face_list.size};
+        forall i in this.wake_face_dom {
+            this.wakeFace_[i] = wake_face_list[i-1][1];
+            this.wakeFaceX_[i] = this.faceCentroidX_[this.wakeFace_[i]];
+            this.wakeFaceY_[i] = this.faceCentroidY_[this.wakeFace_[i]];
+        }
+        for i in this.wake_face_dom {
+            this.wakeFace2index_[this.wakeFace_[i]] = i;
+        }
         
 
         this.deltaSupperTEx_ = this.TEnodeXcoord_ - this.elemCentroidX_[this.upperTEelem_];
@@ -374,7 +392,7 @@ class spatialDiscretization {
     proc initializeSolution() {
         if this.inputs_.START_FILENAME_ != "" {
             writeln("Initializing solution from file: ", this.inputs_.START_FILENAME_);
-            const (xElem, yElem, rho, phi, it, time, res, cl, cd, cm, circulation) = readSolution(this.inputs_.START_FILENAME_);
+            const (xElem, yElem, rho, phi, it, time, res, cl, cd, cm, circulation, wakeGamma) = readSolution(this.inputs_.START_FILENAME_);
             if phi.size != this.nelemDomain_ {
                 halt("Error: START_FILENAME mesh size does not match current mesh size.");
             }
@@ -1017,6 +1035,45 @@ class spatialDiscretization {
         fieldsWall["nyWall"] = nyWall;
 
         writer.writeWallSolution(this.mesh_, wall_dom, fieldsWall);
+
+        const wake_dom = {0..<this.wake_face_dom.size};
+        var fieldsWake = new map(string, [wake_dom] real(64));
+        var uWake: [wake_dom] real(64);
+        var vWake: [wake_dom] real(64);
+        var rhoWake: [wake_dom] real(64);
+        var pWake: [wake_dom] real(64);
+        var machWake: [wake_dom] real(64);
+        var xWake: [wake_dom] real(64);
+        var yWake: [wake_dom] real(64);
+        var nxWake: [wake_dom] real(64);
+        var nyWake: [wake_dom] real(64);
+        var gammaWake: [wake_dom] real(64);
+
+        forall (i, face) in zip(this.wake_face_dom, this.wakeFace_) {
+            uWake[i-1] = this.uFace_[face];
+            vWake[i-1] = this.vFace_[face];
+            rhoWake[i-1] = this.rhoFace_[face];
+            pWake[i-1] = (this.rhoFace_[face]**this.inputs_.GAMMA_ / (this.inputs_.GAMMA_ * this.inputs_.MACH_ * this.inputs_.MACH_ * this.inputs_.P_INF_) - 1 ) / (this.inputs_.GAMMA_/2*this.inputs_.MACH_**2);
+            machWake[i-1] = this.machFace_[face];
+            xWake[i-1] = this.faceCentroidX_[face];
+            yWake[i-1] = this.faceCentroidY_[face];
+            nxWake[i-1] = this.faceNormalX_[face];
+            nyWake[i-1] = this.faceNormalY_[face];
+            gammaWake[i-1] = this.circulation_;
+        }
+
+        fieldsWake["uWake"] = uWake;
+        fieldsWake["vWake"] = vWake;
+        fieldsWake["rhoWake"] = rhoWake;
+        fieldsWake["cpWake"] = pWake;
+        fieldsWake["machWake"] = machWake;
+        fieldsWake["xWake"] = xWake;
+        fieldsWake["yWake"] = yWake;
+        fieldsWake["nxWake"] = nxWake;
+        fieldsWake["nyWake"] = nyWake;
+        fieldsWake["gammaWake"] = gammaWake;
+
+        writer.writeWakeToCGNS(this.wakeFaceX_, this.wakeFaceY_, this.wakeFaceZ_, wake_dom, fieldsWake);
     }
 
     proc writeSolution() {
@@ -1145,6 +1202,45 @@ class spatialDiscretization {
         fieldsWall["nyWall"] = nyWall;
 
         writer.writeWallSolution(this.mesh_, wall_dom, fieldsWall);
+
+        const wake_dom = {0..<this.wake_face_dom.size};
+        var fieldsWake = new map(string, [wake_dom] real(64));
+        var uWake: [wake_dom] real(64);
+        var vWake: [wake_dom] real(64);
+        var rhoWake: [wake_dom] real(64);
+        var pWake: [wake_dom] real(64);
+        var machWake: [wake_dom] real(64);
+        var xWake: [wake_dom] real(64);
+        var yWake: [wake_dom] real(64);
+        var nxWake: [wake_dom] real(64);
+        var nyWake: [wake_dom] real(64);
+        var gammaWake: [wake_dom] real(64);
+
+        forall (i, face) in zip(this.wake_face_dom, this.wakeFace_) {
+            uWake[i-1] = this.uFace_[face];
+            vWake[i-1] = this.vFace_[face];
+            rhoWake[i-1] = this.rhoFace_[face];
+            pWake[i-1] = (this.rhoFace_[face]**this.inputs_.GAMMA_ / (this.inputs_.GAMMA_ * this.inputs_.MACH_ * this.inputs_.MACH_ * this.inputs_.P_INF_) - 1 ) / (this.inputs_.GAMMA_/2*this.inputs_.MACH_**2);
+            machWake[i-1] = this.machFace_[face];
+            xWake[i-1] = this.faceCentroidX_[face];
+            yWake[i-1] = this.faceCentroidY_[face];
+            nxWake[i-1] = this.faceNormalX_[face];
+            nyWake[i-1] = this.faceNormalY_[face];
+            gammaWake[i-1] = this.circulation_;
+        }
+
+        fieldsWake["uWake"] = uWake;
+        fieldsWake["vWake"] = vWake;
+        fieldsWake["rhoWake"] = rhoWake;
+        fieldsWake["cpWake"] = pWake;
+        fieldsWake["machWake"] = machWake;
+        fieldsWake["xWake"] = xWake;
+        fieldsWake["yWake"] = yWake;
+        fieldsWake["nxWake"] = nxWake;
+        fieldsWake["nyWake"] = nyWake;
+        fieldsWake["gammaWake"] = gammaWake;
+
+        writer.writeWakeToCGNS(this.wakeFaceX_, this.wakeFaceY_, this.wakeFaceZ_, wake_dom, fieldsWake);
     }
 }
 

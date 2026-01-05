@@ -263,6 +263,31 @@ class potentialFlowWriter_c {
     }
   }
 
+  proc writeWakeToCGNS(ref wakeXcoord : [] real(64), ref wakeYcoord : [] real(64), ref wakeZcoord : [] real(64), dom: domain(1), fieldMap: map(string, [dom] real(64))) {
+
+    const wallBaseName = "WakeBase";
+    const cellDim: c_int = 1;      // 1D elements (lines)
+    const physDim: c_int = 2;      // 2D space (x, y)
+    const wallBaseId = cgnsFile_.createBase(wallBaseName, cellDim, physDim);
+
+    const zoneName : string = "wake";
+    var size : [0..2] cgsize_t;
+    size[0] = wakeXcoord.size;
+    size[1] = wakeXcoord.size-1;
+    size[2] = 0;
+
+    zoneId = cgnsFile_.createZone(wallBaseId, zoneName, size, Structured);
+
+    cgnsFile_.writeGridCoordinates(wallBaseId, zoneId, wakeXcoord, wakeYcoord, wakeZcoord);
+
+    const solIDcc = cgnsFile_.addNodeCenteredSolution(wallBaseId, zoneId, "WAKE_FLOW_SOLUTION_NC");
+
+    for name in fieldMap.keys() {
+        var values = try! fieldMap[name];
+        cgnsFile_.addFieldSolution(wallBaseId, zoneId, solIDcc, name, values);
+    }
+  }
+
   proc writeConvergenceHistory(time: list(real(64)), iterations: list(int), residuals: list(real(64)), cls: list(real(64)), cds: list(real(64)), cms: list(real(64)), circulation: list(real(64))) {
     const nMetrics = 7;
     const maxIter = iterations.size;

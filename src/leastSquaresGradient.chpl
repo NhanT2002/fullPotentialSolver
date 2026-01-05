@@ -22,6 +22,7 @@ module leastSquaresGradient {
 
 use mesh;
 use Math;
+use Map;
 
 /*
  * LeastSquaresGradient class
@@ -458,6 +459,76 @@ class LeastSquaresGradientQR {
             gradY[elem] = gy;
         }
     }
+
+    /*
+     * Compute gradient of a scalar field using fully precomputed weights
+     */
+    proc computeGradient(const ref phi: [] real(64), 
+                         ref gradX: [] real(64), 
+                         ref gradY: [] real(64),
+                         const ref kuttaCell_: [] int,
+                         const ref wakeFace2index: map(int, int),
+                         const ref wakeFaceGamma: [] real(64)) {
+        
+        forall elem in 1..this.nelemDomain_ {
+            const faces = this.mesh_.elem2edge_[this.mesh_.elem2edgeIndex_[elem] + 1 .. 
+                                                 this.mesh_.elem2edgeIndex_[elem + 1]];
+            
+            const phiI = phi[elem];
+            var gx = 0.0, gy = 0.0;
+            
+            for face in faces {
+                const elem1 = this.mesh_.edge2elem_[1, face];
+                const elem2 = this.mesh_.edge2elem_[2, face];
+                const neighbor = if elem1 == elem then elem2 else elem1;
+
+                var phiJ = phi[neighbor];
+
+                const elemKuttaType = kuttaCell_[elem];
+                const neighborKuttaType = kuttaCell_[neighbor];
+                if (elemKuttaType == 1 && neighborKuttaType == -1) {
+                    // Elem is above wake, neighbor is below wake
+                    // To get continuous potential, add Γ to lower surface value
+                    // φ_seen = φ_lower + Γ = φ_upper
+                    try {
+                        const wakeIndex = wakeFace2index[face];
+                        const circulation_ = wakeFaceGamma[wakeIndex];
+                        phiJ += circulation_;
+                    }
+                    catch e: Error {
+                        halt("Error: Face ", face, " not found in wakeFace2index map.");
+                    }
+                } else if (elemKuttaType == -1 && neighborKuttaType == 1) {
+                    // Elem is below wake, neighbor is above wake
+                    // To get continuous potential, subtract Γ from upper surface value
+                    // φ_seen = φ_upper - Γ = φ_lower
+                    try {
+                        const wakeIndex = wakeFace2index[face];
+                        const circulation_ = wakeFaceGamma[wakeIndex];
+                        phiJ -= circulation_;
+                    }
+                    catch e: Error {
+                        halt("Error: Face ", face, " not found in wakeFace2index map.");
+                    }
+                }
+
+                const dphi = phiJ - phiI;
+                
+                // Use precomputed weights for correct perspective
+                if elem == elem1 {
+                    gx += this.wxFinal1_[face] * dphi;
+                    gy += this.wyFinal1_[face] * dphi;
+                } else {
+                    gx += this.wxFinal2_[face] * dphi;
+                    gy += this.wyFinal2_[face] * dphi;
+                }
+            }
+            
+            gradX[elem] = gx;
+            gradY[elem] = gy;
+        }
+    }
+
     /*
      * Compute gradient of a scalar field using fully precomputed weights
      */

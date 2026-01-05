@@ -6,6 +6,7 @@ use mesh;
 use spatialDiscretization;
 use temporalDiscretization;
 use unsteadySpatialDiscretization;
+use unsteadyTemporalDiscretization;
 use testMetrics;
 use linearAlgebra;
 
@@ -84,11 +85,10 @@ proc main() {
             }
             else if inputs.FLOW_ == "unsteady" {
                 var spatialDisc = new shared unsteadySpatialDiscretization(Mesh, inputs);
-                spatialDisc.initializeMetrics();
-                spatialDisc.initializeKuttaCells();
-                spatialDisc.initializeSolution();
-                spatialDisc.run();
-                spatialDisc.writeSolution();
+                var unsteadySolver = new shared unsteadyTemporalDiscretization(spatialDisc, inputs);
+
+                unsteadySolver.initialize();
+                unsteadySolver.solve();
             }
         }
 

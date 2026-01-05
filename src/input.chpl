@@ -236,4 +236,28 @@ record potentialInputs {
         this.beta_crit_ = this.MACH_**2 * this.q_crit_ / (1 + (this.GAMMA_ - 1)/2 * this.MACH_**2 * (1 - this.q_crit_**2));
         this.rho_crit_ = (1.0 + (this.GAMMA_ - 1)/2 * this.MACH_ * this.MACH_ * (1.0 - this.q_crit_ * this.q_crit_)) ** (1.0 / (this.GAMMA_ - 1.0));
     }
+
+    // Update angle of attack and recompute velocity components
+    proc ref setAlpha(newAlpha: real(64)) {
+        this.ALPHA_ = newAlpha;
+        this.U_INF_ = this.VEL_INF_ * cos(this.ALPHA_ * pi / 180.0);
+        this.V_INF_ = this.VEL_INF_ * sin(this.ALPHA_ * pi / 180.0);
+    }
+
+    // Compute instantaneous angle of attack for oscillating airfoil
+    // α(t) = α_0 + Δα * sin(2π * f * t + φ)
+    proc getOscillatingAlpha(t: real(64)): real(64) {
+        return this.ALPHA_0_ + this.ALPHA_AMPLITUDE_ * sin(this.ALPHA_FREQUENCY_ * t + this.ALPHA_PHASE_);
+    }
+
+    // Get effective time step for temporal discretization
+    // For dual time stepping (oscillating airfoil): use physical TIME_STEP
+    // For pseudo time stepping: use CFL
+    proc getTimeStep(): real(64) {
+        if this.DUAL_TIME_STEP_ {
+            return this.TIME_STEP_;
+        } else {
+            return this.CFL_;
+        }
+    }
 }

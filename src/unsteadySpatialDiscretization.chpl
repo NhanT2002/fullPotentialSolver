@@ -107,7 +107,12 @@ class unsteadySpatialDiscretization {
 
     var circulation_ : real(64);
     var wake_face_dom: domain(1) = {1..0};
-    var wake_face_: [wake_face_dom] int;
+    var wakeFace_: [wake_face_dom] int;
+    var wakeFace2index_: map(int, int);
+    var wakeFaceX_: [wake_face_dom] real(64);
+    var wakeFaceY_: [wake_face_dom] real(64);
+    var wakeFaceZ_: [wake_face_dom] real(64);
+    var wakeFaceGamma_: [wake_face_dom] real(64);
 
     var wall_dom: sparse subdomain(elemDomain_dom); // cell next to wall boundary
     var fluid_dom: sparse subdomain(elemDomain_dom); // all other cells without wall_dom
@@ -365,7 +370,7 @@ class unsteadySpatialDiscretization {
 
             }
         }
-        var wake_face_list = new list(int);
+        var wake_face_list = new list((real(64), int));
         for face in 1..this.nface_ {
             const elem1 = this.mesh_.edge2elem_[1, face];
             const elem2 = this.mesh_.edge2elem_[2, face];
@@ -373,16 +378,18 @@ class unsteadySpatialDiscretization {
                (this.kuttaCell_[elem1] == -1 && this.kuttaCell_[elem2] == 1) ) {
                 this.wake_dom += elem1;
                 this.wake_dom += elem2;
-                wake_face_list.pushBack(face);
+                wake_face_list.pushBack((this.faceCentroidX_[face], face));
             }
         }
+        sort(wake_face_list);
         this.wake_face_dom = {1..wake_face_list.size};
         forall i in this.wake_face_dom {
-            this.wake_face_[i] = wake_face_list[i];
+            this.wakeFace_[i] = wake_face_list[i-1][1];
+            this.wakeFaceX_[i] = this.faceCentroidX_[this.wakeFace_[i]];
+            this.wakeFaceY_[i] = this.faceCentroidY_[this.wakeFace_[i]];
         }
-        writeln("wake_face = ", this.wake_face_);
-        for face in this.wake_face_ {
-            writeln("Wake face: ", face, " between elems ", this.mesh_.edge2elem_[1, face], " and ", this.mesh_.edge2elem_[2, face]);
+        for i in this.wake_face_dom {
+            this.wakeFace2index_[this.wakeFace_[i]] = i;
         }
         
 
@@ -396,16 +403,20 @@ class unsteadySpatialDiscretization {
     proc initializeSolution() {
         if this.inputs_.START_FILENAME_ != "" {
             writeln("Initializing solution from file: ", this.inputs_.START_FILENAME_);
-            const (xElem, yElem, rho, phi, it, time, res, cl, cd, cm, circulation) = readSolution(this.inputs_.START_FILENAME_);
+            const (xElem, yElem, rho, phi, it, time, res, cl, cd, cm, circulation, wakeGamma) = readSolution(this.inputs_.START_FILENAME_);
             if phi.size != this.nelemDomain_ {
                 halt("Error: START_FILENAME mesh size does not match current mesh size.");
             }
             else {
-                forall elem in 1..this.nelem_ {
+                // Load only interior cells from file (phi and rho arrays have size nelemDomain_)
+                forall elem in 1..this.nelemDomain_ {
                     this.phi_[elem] = phi[elem];
                     this.rhorho_[elem] = rho[elem];
                 }
                 this.circulation_ = circulation.last;
+                forall i in this.wake_face_dom {
+                    this.wakeFaceGamma_[i] = wakeGamma[i];
+                }
             }
         }
         else {
@@ -421,17 +432,23 @@ class unsteadySpatialDiscretization {
         }
 
         this.updateGhostCellsPhi();
+        
+        // Initialize phi_m1_ = phi_ BEFORE computePrimitiveVariablesFromPhi()
+        // because that proc uses phi_m1_ for time derivative computation
+        forall elem in 1..this.nelem_ {
+            this.phi_m1_[elem] = this.phi_[elem];
+            this.phi_m2_[elem] = this.phi_[elem];
+        }
+        
         this.computePrimitiveVariablesFromPhi();
         this.updateGhostCellsVelocity();
 
         forall elem in 1..this.nelem_ {
             this.beta_[elem] = this.rhorho_[elem] ** (2.0 - this.inputs_.GAMMA_);
             this.rhorho_m1_[elem] = this.rhorho_[elem];
-            this.phi_m1_[elem] = this.phi_[elem];
             this.uu_m1_[elem] = this.uu_[elem];
             this.vv_m1_[elem] = this.vv_[elem];
             this.beta_m1_[elem] = this.beta_[elem];
-            this.phi_m2_[elem] = this.phi_[elem];
         }
     }
 
@@ -536,15 +553,16 @@ class unsteadySpatialDiscretization {
     }
 
     proc computePrimitiveVariablesFromPhi() {
-        this.lsGradQR_!.computeGradient(this.phi_, this.uu_, this.vv_, this.kuttaCell_, this.circulation_);
+        this.lsGradQR_!.computeGradient(this.phi_, this.uu_, this.vv_, this.kuttaCell_, this.wakeFace2index_, this.wakeFaceGamma_);
         // Compute velocity gradients for reconstruction
         this.lsGradQR_!.computeGradient(this.uu_, this.graduuX_, this.graduuY_);
         this.lsGradQR_!.computeGradient(this.vv_, this.gradvvX_, this.gradvvY_);
 
-        this.lsGradQR_!.computeGradient(this.phi_minus_phi_m1_, this.gradX_phi_minus_phi_m1_, this.gradY_phi_minus_phi_m1_, this.kuttaCell_, this.circulation_);
-
         forall elem in 1..this.nelemDomain_ {
-            const phi_t = this.phi_minus_phi_m1_[elem] / this.inputs_.CFL_;
+            const phi_t = (this.phi_[elem] - this.phi_m1_[elem]) / this.inputs_.TIME_STEP_;
+            if elem == elemID {
+                writeln("Upper TE elem phi_t: ", phi_t, " phi: ", this.phi_[elem], " phi_m1: ", this.phi_m1_[elem]);
+            }
             this.rhorho_[elem] = this.rho(this.uu_[elem], this.vv_[elem], phi_t);
             this.machmach_[elem] = this.mach(this.uu_[elem], this.vv_[elem], this.rhorho_[elem]);
             
@@ -636,7 +654,12 @@ class unsteadySpatialDiscretization {
             // Average the reconstructed values
             const uAvg = 0.5 * (uL + uR);
             const vAvg = 0.5 * (vL + vR);
-            const phi_t = 0.5 * (this.phi_minus_phi_m1_[elem1] + this.phi_minus_phi_m1_[elem2]) / this.inputs_.CFL_;
+            const phi_t = 0.5 * ((this.phi_[elem1] - this.phi_m1_[elem1]) + (this.phi_[elem2] - this.phi_m1_[elem2])) / this.inputs_.TIME_STEP_;
+            if elem1 == elemID && elem2 > this.nelemDomain_ {
+                writeln("phi_[", elem1, "] = ", this.phi_[elem1], ", phi_m1_[", elem1, "] = ", this.phi_m1_[elem1]);
+                writeln("phi_[", elem2, "] = ", this.phi_[elem2], ", phi_m1_[", elem2, "] = ", this.phi_m1_[elem2]);
+                writeln("phi_t at face ", face, ": ", phi_t);
+            }
 
             // Get phi values with potential jump across wake
             var phi1 = this.phi_[elem1];
@@ -758,7 +781,7 @@ class unsteadySpatialDiscretization {
 
                 res += sign * this.flux_[face];
             }
-            res = res / this.elemVolume_[elem] + (this.rhorho_[elem] - this.rhorho_m1_[elem]) / this.inputs_.CFL_;
+            res = res + this.elemVolume_[elem] * (this.rhorho_[elem] - this.rhorho_m1_[elem]) / this.inputs_.TIME_STEP_;
             this.res_[elem] = res;
         }
 
@@ -768,8 +791,7 @@ class unsteadySpatialDiscretization {
         // Extrapolated phi at upper and lower TE elem
         const phi_upper = this.phi_[this.upperTEelem_] + (this.uu_[this.upperTEelem_] * this.deltaSupperTEx_ + this.vv_[this.upperTEelem_] * this.deltaSupperTEy_);
         const phi_lower = this.phi_[this.lowerTEelem_] + (this.uu_[this.lowerTEelem_] * this.deltaSlowerTEx_ + this.vv_[this.lowerTEelem_] * this.deltaSlowerTEy_);
-        const gamma_computed = phi_upper - phi_lower;
-        this.kutta_res_ = (this.circulation_ - gamma_computed) * this.res_scale_;
+        this.circulation_ = phi_upper - phi_lower;
     }
 
     proc run() {
@@ -943,6 +965,45 @@ class unsteadySpatialDiscretization {
         fieldsWall["nyWall"] = nyWall;
 
         writer.writeWallSolution(this.mesh_, wall_dom, fieldsWall);
+
+        const wake_dom = {0..<this.wake_face_dom.size};
+        var fieldsWake = new map(string, [wake_dom] real(64));
+        var uWake: [wake_dom] real(64);
+        var vWake: [wake_dom] real(64);
+        var rhoWake: [wake_dom] real(64);
+        var pWake: [wake_dom] real(64);
+        var machWake: [wake_dom] real(64);
+        var xWake: [wake_dom] real(64);
+        var yWake: [wake_dom] real(64);
+        var nxWake: [wake_dom] real(64);
+        var nyWake: [wake_dom] real(64);
+        var gammaWake: [wake_dom] real(64);
+
+        forall (i, face) in zip(this.wake_face_dom, this.wakeFace_) {
+            uWake[i-1] = this.uFace_[face];
+            vWake[i-1] = this.vFace_[face];
+            rhoWake[i-1] = this.rhoFace_[face];
+            pWake[i-1] = (this.rhoFace_[face]**this.inputs_.GAMMA_ / (this.inputs_.GAMMA_ * this.inputs_.MACH_ * this.inputs_.MACH_ * this.inputs_.P_INF_) - 1 ) / (this.inputs_.GAMMA_/2*this.inputs_.MACH_**2);
+            machWake[i-1] = this.machFace_[face];
+            xWake[i-1] = this.faceCentroidX_[face];
+            yWake[i-1] = this.faceCentroidY_[face];
+            nxWake[i-1] = this.faceNormalX_[face];
+            nyWake[i-1] = this.faceNormalY_[face];
+            gammaWake[i-1] = this.wakeFaceGamma_[i];
+        }
+
+        fieldsWake["uWake"] = uWake;
+        fieldsWake["vWake"] = vWake;
+        fieldsWake["rhoWake"] = rhoWake;
+        fieldsWake["cpWake"] = pWake;
+        fieldsWake["machWake"] = machWake;
+        fieldsWake["xWake"] = xWake;
+        fieldsWake["yWake"] = yWake;
+        fieldsWake["nxWake"] = nxWake;
+        fieldsWake["nyWake"] = nyWake;
+        fieldsWake["gammaWake"] = gammaWake;
+
+        writer.writeWakeToCGNS(this.wakeFaceX_, this.wakeFaceY_, this.wakeFaceZ_, wake_dom, fieldsWake);
     }
 
     proc writeSolution() {
@@ -1071,6 +1132,45 @@ class unsteadySpatialDiscretization {
         fieldsWall["nyWall"] = nyWall;
 
         writer.writeWallSolution(this.mesh_, wall_dom, fieldsWall);
+
+        const wake_dom = {0..<this.wake_face_dom.size};
+        var fieldsWake = new map(string, [wake_dom] real(64));
+        var uWake: [wake_dom] real(64);
+        var vWake: [wake_dom] real(64);
+        var rhoWake: [wake_dom] real(64);
+        var pWake: [wake_dom] real(64);
+        var machWake: [wake_dom] real(64);
+        var xWake: [wake_dom] real(64);
+        var yWake: [wake_dom] real(64);
+        var nxWake: [wake_dom] real(64);
+        var nyWake: [wake_dom] real(64);
+        var gammaWake: [wake_dom] real(64);
+
+        forall (i, face) in zip(this.wake_face_dom, this.wakeFace_) {
+            uWake[i-1] = this.uFace_[face];
+            vWake[i-1] = this.vFace_[face];
+            rhoWake[i-1] = this.rhoFace_[face];
+            pWake[i-1] = (this.rhoFace_[face]**this.inputs_.GAMMA_ / (this.inputs_.GAMMA_ * this.inputs_.MACH_ * this.inputs_.MACH_ * this.inputs_.P_INF_) - 1 ) / (this.inputs_.GAMMA_/2*this.inputs_.MACH_**2);
+            machWake[i-1] = this.machFace_[face];
+            xWake[i-1] = this.faceCentroidX_[face];
+            yWake[i-1] = this.faceCentroidY_[face];
+            nxWake[i-1] = this.faceNormalX_[face];
+            nyWake[i-1] = this.faceNormalY_[face];
+            gammaWake[i-1] = this.circulation_;
+        }
+
+        fieldsWake["uWake"] = uWake;
+        fieldsWake["vWake"] = vWake;
+        fieldsWake["rhoWake"] = rhoWake;
+        fieldsWake["cpWake"] = pWake;
+        fieldsWake["machWake"] = machWake;
+        fieldsWake["xWake"] = xWake;
+        fieldsWake["yWake"] = yWake;
+        fieldsWake["nxWake"] = nxWake;
+        fieldsWake["nyWake"] = nyWake;
+        fieldsWake["gammaWake"] = gammaWake;
+
+        writer.writeWakeToCGNS(this.wakeFaceX_, this.wakeFaceY_, this.wakeFaceZ_, wake_dom, fieldsWake);
     }
 }
 
