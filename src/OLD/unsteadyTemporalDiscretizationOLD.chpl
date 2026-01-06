@@ -50,7 +50,7 @@ class unsteadyTemporalDiscretization {
         this.spatialDisc_ = spatialDisc;
         this.inputs_ = inputs;
 
-        // Add 1 extra DOF for circulation Γ
+        // Add 1 extra DOF for circulation Γ (Kutta condition)
         const M = spatialDisc.nelemDomain_ + 1;
         const N = spatialDisc.nelemDomain_ + 1;
         this.gammaIndex_ = spatialDisc.nelemDomain_;  // 0-based index for Γ
@@ -111,82 +111,97 @@ class unsteadyTemporalDiscretization {
                     this.A_petsc.set(elem-1, neighbor-1, 0.0);
                 }
             }
-            // Initialize dRes_i/dΓ column entries for wake-adjacent cells
+            // Pre-allocate circulation column for wake cells
             this.A_petsc.set(elem-1, this.gammaIndex_, 0.0);
         }
-        
-        // Initialize Γ row (Kutta condition): Γ - (φ_upper - φ_lower) = 0
-        // dKutta/dΓ = 1
+        // === KUTTA CONDITION ROW ===
+        // K = Γ - (φ_upper - φ_lower) = 0
+        // ∂K/∂Γ = 1
+        // ∂K/∂φ_upper = -1
+        // ∂K/∂φ_lower = +1
         this.A_petsc.set(this.gammaIndex_, this.gammaIndex_, 0.0);
-        // dKutta/dφ_upperTE = -1
+        // Upper TE element
         this.A_petsc.set(this.gammaIndex_, this.spatialDisc_.upperTEelem_ - 1, 0.0);
-        // dKutta/dφ_lowerTE = +1
+        // Lower TE element
         this.A_petsc.set(this.gammaIndex_, this.spatialDisc_.lowerTEelem_ - 1, 0.0);
-
         this.A_petsc.assemblyComplete();
         // this.A_petsc.matView();
     }
+
+    // Number of wake faces with gamma coupled to circulation (for Jacobian)
+    // This is set based on convection distance in initialize()
+    var nCoupledWakeFaces_: int = 1;
 
     proc computeGradientSensitivity() {
         // Compute ∂(∇φ)/∂Γ for each cell.
         // This captures how each cell's gradient depends on circulation through
         // its wake-crossing faces.
         //
+        // For UNSTEADY flow with vortex shedding:
+        // Only the first nCoupledWakeFaces_ wake faces have their gamma coupled to circulation_.
+        // Other wake faces have frozen gamma from previous time steps.
+        //
+        // For QUASI-STEADY mode (large TIME_STEP):
+        // All wake faces have gamma = circulation_, so all contribute to sensitivity.
+        //
         // For cell I with gradient: ∇φ_I = Σ_k w_Ik * (φ_k_corrected - φ_I)
         // where φ_k_corrected includes the Γ correction for wake-crossing neighbors:
-        //   - If I above (1), k below (-1): φ_k_corrected = φ_k + Γ
-        //   - If I below (-1), k above (1): φ_k_corrected = φ_k - Γ
+        //   - If I above (1), k below (-1): φ_k_corrected = φ_k + Γ_face
+        //   - If I below (-1), k above (1): φ_k_corrected = φ_k - Γ_face
         //
-        // Therefore: ∂(∇φ_I)/∂Γ = Σ_{k: wake-crossing} w_Ik * (±1)
+        // Therefore: ∂(∇φ_I)/∂Γ = Σ_{coupled faces} w_Ik * (±1)
 
         // Reset arrays
         this.dgradX_dGamma_ = 0.0;
         this.dgradY_dGamma_ = 0.0;
 
-        forall elem in 1..this.spatialDisc_.nelemDomain_ {
-            const kuttaType_elem = this.spatialDisc_.kuttaCell_[elem];
+        const numWakeFaces = this.spatialDisc_.wake_face_dom.size;
+        if numWakeFaces == 0 {
+            return;
+        }
 
-            // Only cells in wake region (above=1 or below=-1) can have wake-crossing faces
-            if kuttaType_elem == 1 || kuttaType_elem == -1 {
-                const faces = this.spatialDisc_.mesh_.elem2edge_[
-                    this.spatialDisc_.mesh_.elem2edgeIndex_[elem] + 1 ..
-                    this.spatialDisc_.mesh_.elem2edgeIndex_[elem + 1]];
+        // Determine number of coupled wake faces based on convection distance
+        var nCoupled = this.nCoupledWakeFaces_;
+        if nCoupled > numWakeFaces {
+            nCoupled = numWakeFaces;
+        }
 
-                var dgx = 0.0, dgy = 0.0;
+        // Process all coupled wake faces (first nCoupled faces, sorted by x from TE)
+        for wakeIdx in 1..nCoupled {
+            const face = this.spatialDisc_.wakeFace_[wakeIdx];
+            const elem1 = this.spatialDisc_.mesh_.edge2elem_[1, face];
+            const elem2 = this.spatialDisc_.mesh_.edge2elem_[2, face];
 
-                for face in faces {
-                    const elem1 = this.spatialDisc_.mesh_.edge2elem_[1, face];
-                    const elem2 = this.spatialDisc_.mesh_.edge2elem_[2, face];
-                    const neighbor = if elem1 == elem then elem2 else elem1;
+            // Process elem1
+            if elem1 <= this.spatialDisc_.nelemDomain_ {
+                const kuttaType_elem = this.spatialDisc_.kuttaCell_[elem1];
+                const kuttaType_neighbor = this.spatialDisc_.kuttaCell_[elem2];
+                
+                var wx = this.spatialDisc_.lsGradQR_!.wxFinal1_[face];
+                var wy = this.spatialDisc_.lsGradQR_!.wyFinal1_[face];
 
-                    const kuttaType_neighbor = this.spatialDisc_.kuttaCell_[neighbor];
+                // Sign: +1 if elem above (1), neighbor below (-1)
+                //       -1 if elem below (-1), neighbor above (1)
+                const gammaSgn = if kuttaType_elem == 1 then 1.0 else -1.0;
 
-                    // Check if this is a wake-crossing face
-                    const isWakeCrossing = (kuttaType_elem == 1 && kuttaType_neighbor == -1) ||
-                                           (kuttaType_elem == -1 && kuttaType_neighbor == 1);
+                this.dgradX_dGamma_[elem1] += wx * gammaSgn;
+                this.dgradY_dGamma_[elem1] += wy * gammaSgn;
+            }
 
-                    if isWakeCrossing {
-                        // Get weight from elem to neighbor
-                        var wx, wy: real(64);
-                        if elem == elem1 {
-                            wx = this.spatialDisc_.lsGradQR_!.wxFinal1_[face];
-                            wy = this.spatialDisc_.lsGradQR_!.wyFinal1_[face];
-                        } else {
-                            wx = this.spatialDisc_.lsGradQR_!.wxFinal2_[face];
-                            wy = this.spatialDisc_.lsGradQR_!.wyFinal2_[face];
-                        }
+            // Process elem2
+            if elem2 <= this.spatialDisc_.nelemDomain_ {
+                const kuttaType_elem = this.spatialDisc_.kuttaCell_[elem2];
+                const kuttaType_neighbor = this.spatialDisc_.kuttaCell_[elem1];
+                
+                var wx = this.spatialDisc_.lsGradQR_!.wxFinal2_[face];
+                var wy = this.spatialDisc_.lsGradQR_!.wyFinal2_[face];
 
-                        // Sign: +1 if elem above, neighbor below (φ_neighbor + Γ)
-                        //       -1 if elem below, neighbor above (φ_neighbor - Γ)
-                        const gammaSgn = if kuttaType_elem == 1 then 1.0 else -1.0;
+                // Sign: +1 if elem above (1), neighbor below (-1)
+                //       -1 if elem below (-1), neighbor above (1)
+                const gammaSgn = if kuttaType_elem == 1 then 1.0 else -1.0;
 
-                        dgx += wx * gammaSgn;
-                        dgy += wy * gammaSgn;
-                    }
-                }
-
-                this.dgradX_dGamma_[elem] = dgx;
-                this.dgradY_dGamma_[elem] = dgy;
+                this.dgradX_dGamma_[elem2] += wx * gammaSgn;
+                this.dgradY_dGamma_[elem2] += wy * gammaSgn;
             }
         }
     }
@@ -234,7 +249,13 @@ class unsteadyTemporalDiscretization {
                 this.spatialDisc_.mesh_.elem2edgeIndex_[elem] + 1 .. 
                 this.spatialDisc_.mesh_.elem2edgeIndex_[elem + 1]];
             
-            var diag = 0.0;  // Diagonal contribution d(res_elem)/d(phi_elem)
+            // Time derivative contribution: d/dφ [ V * (ρ^{n+1} - ρ^n) / Δt ]
+            // = V / Δt * dρ/dφ = V / Δt * (∂ρ/∂φ_t * dφ_t/dφ) = V / Δt * (-ρ^{2-γ} * M²) * (1/Δt)
+            // = -V * ρ^{2-γ} * M² / Δt²
+            // var diag = -this.spatialDisc_.elemVolume_[elem] / (this.inputs_.TIME_STEP_**2) *
+            //             this.spatialDisc_.rhorho_[elem] ** (2.0 - this.spatialDisc_.inputs_.GAMMA_) *
+            //             this.spatialDisc_.inputs_.MACH_**2; // Time derivative contribution
+            var diag = 0.0;
             var dRes_dGamma = 0.0;  // Contribution d(res_elem)/d(Γ) for wake-crossing cells
             
             for face in faces {
@@ -428,7 +449,7 @@ class unsteadyTemporalDiscretization {
                     //     }
                     // }
                     
-                    this.A_petsc.add(elem-1, neighbor-1, offdiag * this.spatialDisc_.res_scale_);
+                    this.A_petsc.add(elem-1, neighbor-1, offdiag);
 
                     // === CIRCULATION (Γ) DERIVATIVE ===
                     // flux = 0.5 * (∇φ_elem + ∇φ_neighbor) · m + directCoeff * (φ_neighbor - φ_elem)
@@ -452,17 +473,28 @@ class unsteadyTemporalDiscretization {
                     // Apply sign and area
                     dFlux_dGamma *= sign * area * rhoFace;
 
-                    // Direct term: only for wake-crossing faces
+                    // Direct term: only for coupled wake faces
+                    // For unsteady flow with vortex shedding, only the first nCoupledWakeFaces_
+                    // wake faces have their gamma coupled to circulation_. Other wake faces have
+                    // frozen gamma from previous time steps.
                     // directCoeff * ((φ_neighbor ± Γ) - φ_elem)
                     // ∂/∂Γ = ±directCoeff (sign depends on which side of wake)
                     if isWakeCrossingFace {
-                        var gammaSgn = 0.0;
-                        if kuttaType_elem == 1 && kuttaType_neighbor == -1 {
-                            gammaSgn = 1.0;  // elem above, neighbor below: +Γ
-                        } else {
-                            gammaSgn = -1.0; // elem below, neighbor above: -Γ
+                        // Check if this face is in the coupled set
+                        try {
+                            const wakeIdx = this.spatialDisc_.wakeFace2index_[face];
+                            if wakeIdx <= this.nCoupledWakeFaces_ {
+                                var gammaSgn = 0.0;
+                                if kuttaType_elem == 1 && kuttaType_neighbor == -1 {
+                                    gammaSgn = 1.0;  // elem above, neighbor below: +Γ
+                                } else {
+                                    gammaSgn = -1.0; // elem below, neighbor above: -Γ
+                                }
+                                dFlux_dGamma += directCoeff * area * rhoFace * gammaSgn;
+                            }
+                        } catch e: Error {
+                            // Face not in wake mapping - skip
                         }
-                        dFlux_dGamma += directCoeff * area * rhoFace * gammaSgn;
                     }
 
                     dRes_dGamma += dFlux_dGamma;
@@ -532,9 +564,9 @@ class unsteadyTemporalDiscretization {
                     // Wall flux = V_int · m_wall * A, where V_int = ∇φ_int
                     // If the interior cell has wake-crossing faces, ∇φ_int depends on Γ
                     // ∂flux/∂Γ = (∂∇φ_int/∂Γ · m_wall) * A
-                    const dgradX_elem = this.dgradX_dGamma_[elem];
-                    const dgradY_elem = this.dgradY_dGamma_[elem];
-                    const dFlux_dGamma_wall = (dgradX_elem * mWallX + dgradY_elem * mWallY) * sign * area * rhoFace;
+                    const dgradX_elem_wall = this.dgradX_dGamma_[elem];
+                    const dgradY_elem_wall = this.dgradY_dGamma_[elem];
+                    const dFlux_dGamma_wall = (dgradX_elem_wall * mWallX + dgradY_elem_wall * mWallY) * sign * area * rhoFace;
                     dRes_dGamma += dFlux_dGamma_wall;
 
                 } else {
@@ -568,12 +600,12 @@ class unsteadyTemporalDiscretization {
             }
             
             // Add diagonal entry
-            this.A_petsc.add(elem-1, elem-1, diag * this.spatialDisc_.res_scale_);
+            this.A_petsc.add(elem-1, elem-1, diag);
             // Store diag for possible use in upwinding
             this.Jij_[elem] = diag;
             
             // Add dRes/dΓ entry (column for circulation)
-            this.A_petsc.add(elem-1, this.gammaIndex_, dRes_dGamma * this.spatialDisc_.res_scale_);
+            this.A_petsc.add(elem-1, this.gammaIndex_, dRes_dGamma);
         }
 
         // === BETA-BASED UPWIND AUGMENTATION (element-centric for parallelization) ===
@@ -603,7 +635,7 @@ class unsteadyTemporalDiscretization {
                         if downwindElem == elem {
                             // Use precomputed invL_IJ_ (inverse of cell centroid distance)
                             const increase = this.inputs_.BETA_ * this.spatialDisc_.velMagFace_[face] 
-                            * this.spatialDisc_.invL_IJ_[face] * this.spatialDisc_.res_scale_;
+                            * this.spatialDisc_.invL_IJ_[face];
                             
                             // Increase absolute value of diagonal term for downwind element
                             const diagTerm = this.Jij_[elem];
@@ -634,12 +666,12 @@ class unsteadyTemporalDiscretization {
         // d(R_Γ)/dφ_lowerTE = +1
         
         // dKutta/dΓ = 1
-        this.A_petsc.add(this.gammaIndex_, this.gammaIndex_, 1.0 * this.spatialDisc_.res_scale_);
+        this.A_petsc.add(this.gammaIndex_, this.gammaIndex_, 1.0);
         
-        // dKutta/dφ_upperTE1 = -1.0
-        this.A_petsc.add(this.gammaIndex_, this.spatialDisc_.upperTEelem_ - 1, -1.0 * this.spatialDisc_.res_scale_);
-        // dKutta/dφ_lowerTE1 = +1.0
-        this.A_petsc.add(this.gammaIndex_, this.spatialDisc_.lowerTEelem_ - 1, 1.0 * this.spatialDisc_.res_scale_);
+        // dKutta/dφ_upperTE = -1.0
+        this.A_petsc.add(this.gammaIndex_, this.spatialDisc_.upperTEelem_ - 1, -1.0);
+        // dKutta/dφ_lowerTE = +1.0
+        this.A_petsc.add(this.gammaIndex_, this.spatialDisc_.lowerTEelem_ - 1, 1.0);
         
         this.A_petsc.assemblyComplete();
         // this.A_petsc.matView();
@@ -655,22 +687,22 @@ class unsteadyTemporalDiscretization {
         
         this.computeJacobian();
 
-        if this.inputs_.START_FILENAME_ != "" {
-            writeln("Initializing solution from file: ", this.inputs_.START_FILENAME_);
-            const (xElem, yElem, rho, phi, it, time, res, cl, cd, cm, circulation, wakeGamma) = readSolution(this.inputs_.START_FILENAME_);
-            for i in it.domain {
-                this.timeList_.pushBack(time[i]);
-                this.itList_.pushBack(it[i]);
-                this.resList_.pushBack(res[i]);
-                this.clList_.pushBack(cl[i]);
-                this.cdList_.pushBack(cd[i]);
-                this.cmList_.pushBack(cm[i]);
-                this.circulationList_.pushBack(circulation[i]);
-            }
-            this.it_ = it.last;
-            this.t0_ = time.last;
-            this.first_res_ = res.first;
-        }
+        // if this.inputs_.START_FILENAME_ != "" {
+        //     writeln("Initializing solution from file: ", this.inputs_.START_FILENAME_);
+        //     const (xElem, yElem, rho, phi, it, time, res, cl, cd, cm, circulation, wakeGamma) = readSolution(this.inputs_.START_FILENAME_);
+        //     for i in it.domain {
+        //         this.timeList_.pushBack(time[i]);
+        //         this.itList_.pushBack(it[i]);
+        //         this.resList_.pushBack(res[i]);
+        //         this.clList_.pushBack(cl[i]);
+        //         this.cdList_.pushBack(cd[i]);
+        //         this.cmList_.pushBack(cm[i]);
+        //         this.circulationList_.pushBack(circulation[i]);
+        //     }
+        //     this.it_ = it.last;
+        //     this.t0_ = time.last;
+        //     this.first_res_ = res.first;
+        // }
 
         // Reset adaptive upwinding state for new Mach number
         this.inputs_.upwindAdapted_ = false;
@@ -680,12 +712,174 @@ class unsteadyTemporalDiscretization {
             writeln("  >>> Adaptive upwinding: starting with MU_C=", this.inputs_.MU_C_, ", MACH_C=", this.inputs_.MACH_C_);
         }
         
+        // Calculate number of coupled wake faces based on convection distance
+        // Convection distance per time step: Δx = U_∞ * Δt = Δt (non-dimensional)
+        const numWakeFaces = this.spatialDisc_.wake_face_dom.size;
+        if numWakeFaces > 1 {
+            const wakeLength = this.spatialDisc_.wakeFaceX_[numWakeFaces] - this.spatialDisc_.wakeFaceX_[1];
+            const avgSpacing = wakeLength / (numWakeFaces - 1);
+            const convectionDistance = this.inputs_.TIME_STEP_;  // U_INF = 1.0 non-dimensional
+            
+            // Number of wake faces with gamma coupled to circulation
+            this.nCoupledWakeFaces_ = (convectionDistance / avgSpacing): int;
+            if this.nCoupledWakeFaces_ < 1 {
+                this.nCoupledWakeFaces_ = 1;
+            }
+            if this.nCoupledWakeFaces_ >= numWakeFaces {
+                this.nCoupledWakeFaces_ = numWakeFaces;
+                writeln("  >>> Quasi-steady mode: convection distance (", convectionDistance, 
+                        ") >= wake length (", wakeLength, "), all ", numWakeFaces, " wake faces coupled");
+                // Reset all wake gamma to current circulation
+                this.spatialDisc_.wakeFaceGamma_ = this.spatialDisc_.circulation_;
+                this.spatialDisc_.run();  // Recompute with updated wake gamma
+            } else {
+                writeln("  >>> Unsteady mode: ", this.nCoupledWakeFaces_, " of ", numWakeFaces, 
+                        " wake faces coupled (convection distance = ", convectionDistance, 
+                        ", avg spacing = ", avgSpacing, ")");
+            }
+        } else {
+            this.nCoupledWakeFaces_ = numWakeFaces;
+        }
+        
+        // Recompute gradient sensitivity with correct number of coupled faces
+        this.computeGradientSensitivity();
+        
         // Reset adaptive BETA state for new Mach number
         this.inputs_.betaAdapted_ = false;
         if this.inputs_.ADAPTIVE_BETA_ {
             this.inputs_.BETA_ = this.inputs_.BETA_START_;
             writeln("  >>> Adaptive BETA: starting with BETA=", this.inputs_.BETA_);
         }
+    }
+
+    /**
+     * Main driver for unsteady simulation with oscillating alpha.
+     * This is the outer loop that advances through physical time steps.
+     * At each time step:
+     *   1. Update alpha based on oscillation formula
+     *   2. Store current phi as phi_m1_ (for BDF1)
+     *   3. Advance wake vortices (shift gamma values downstream)
+     *   4. Call Newton solver to converge this time step
+     *   5. Output results
+     */
+    proc solveUnsteady() {
+        var physicalTime: real(64) = 0.0;
+        var timeStepCount: int = 0;
+        const dt = this.inputs_.TIME_STEP_;
+        const tFinal = this.inputs_.TIME_FINAL_;
+        
+        // Lists to store unsteady history at each physical time step
+        var unsteadyTimeList = new list(real(64));
+        var unsteadyStepList = new list(int);
+        var unsteadyAlphaList = new list(real(64));
+        var unsteadyClList = new list(real(64));
+        var unsteadyCdList = new list(real(64));
+        var unsteadyCmList = new list(real(64));
+        var unsteadyCirculationList = new list(real(64));
+        
+        // Oscillating alpha parameters
+        const alpha0 = this.inputs_.ALPHA_0_;           // Mean angle of attack [degrees]
+        const alphaAmp = this.inputs_.ALPHA_AMPLITUDE_; // Oscillation amplitude [degrees]
+        const alphaFreq = this.inputs_.ALPHA_FREQUENCY_;// Reduced frequency k = ω*c/(2*U_inf)
+        const alphaPhase = this.inputs_.ALPHA_PHASE_;   // Phase offset [radians]
+        
+        writeln("\n=== UNSTEADY SIMULATION ===");
+        writeln("  Time step: ", dt);
+        writeln("  Final time: ", tFinal);
+        writeln("  Alpha_0: ", alpha0, " deg");
+        writeln("  Alpha amplitude: ", alphaAmp, " deg");
+        writeln("  Reduced frequency k: ", alphaFreq);
+        writeln("  Phase: ", alphaPhase, " rad");
+        
+        // Set initial alpha
+        var alpha_current = alpha0 + alphaAmp * sin(alphaFreq * physicalTime + alphaPhase);
+        this.inputs_.setAlpha(alpha_current);
+        this.spatialDisc_.inputs_.setAlpha(alpha_current);
+        writeln("  Initial alpha: ", alpha_current, " deg");
+        writeln("");
+        
+        // Initialize and solve the first time step (from initial condition)
+        this.initialize();
+        this.solve();
+        
+        // Store initial state
+        const (Cl0, Cd0, Cm0) = this.spatialDisc_.computeAerodynamicCoefficients();
+        unsteadyTimeList.pushBack(physicalTime);
+        unsteadyStepList.pushBack(0);
+        unsteadyAlphaList.pushBack(alpha_current);
+        unsteadyClList.pushBack(Cl0);
+        unsteadyCdList.pushBack(Cd0);
+        unsteadyCmList.pushBack(Cm0);
+        unsteadyCirculationList.pushBack(this.spatialDisc_.circulation_);
+        
+        // Time stepping loop
+        while physicalTime < tFinal {
+            timeStepCount += 1;
+            physicalTime += dt;
+            
+            writeln("\n=== TIME STEP ", timeStepCount, " | t = ", physicalTime, " ===");
+            
+            // 1. Update alpha based on oscillation
+            alpha_current = alpha0 + alphaAmp * sin(alphaFreq * physicalTime + alphaPhase);
+            this.inputs_.setAlpha(alpha_current);
+            this.spatialDisc_.inputs_.setAlpha(alpha_current);
+            writeln("  Alpha = ", alpha_current, " deg");
+            
+            // 2. Store current solution as phi_m1_ and rhorho_m1_ for BDF1 time derivative
+            forall elem in 1..this.spatialDisc_.nelemDomain_ {
+                this.spatialDisc_.phi_m1_[elem] = this.spatialDisc_.phi_[elem];
+                this.spatialDisc_.rhorho_m1_[elem] = this.spatialDisc_.rhorho_[elem];
+            }
+            
+            // 3. Advance wake vortices (shift gamma values downstream)
+            this.spatialDisc_.advanceWakeVortices();
+            
+            // 4. Reset iteration counter and convergence flags for new time step
+            this.it_ = 0;
+            this.inputs_.betaAdapted_ = false;
+            if this.inputs_.ADAPTIVE_BETA_ {
+                this.inputs_.BETA_ = this.inputs_.BETA_START_;
+            }
+
+            // Initialize solution guess for new time step
+            forall elem in 1..this.spatialDisc_.nelemDomain_ {
+                this.spatialDisc_.phi_[elem] = this.spatialDisc_.inputs_.U_INF_ * this.spatialDisc_.elemCentroidX_[elem] +
+                                            this.spatialDisc_.inputs_.V_INF_ * this.spatialDisc_.elemCentroidY_[elem];
+            }
+            
+            // 5. Recompute residual with new alpha and wake gamma
+            this.spatialDisc_.run();
+            
+            // 6. Recompute gradient sensitivity (may have changed with nCoupledWakeFaces)
+            this.computeGradientSensitivity();
+            
+            // 7. Solve Newton iterations for this time step
+            this.solve();
+            
+            // Output progress and store unsteady history
+            const (Cl, Cd, Cm) = this.spatialDisc_.computeAerodynamicCoefficients();
+            writeln("  Time step ", timeStepCount, " converged: Cl=", Cl, ", Cd=", Cd, 
+                    ", Gamma=", this.spatialDisc_.circulation_);
+            
+            // Store time step results
+            unsteadyTimeList.pushBack(physicalTime);
+            unsteadyStepList.pushBack(timeStepCount);
+            unsteadyAlphaList.pushBack(alpha_current);
+            unsteadyClList.pushBack(Cl);
+            unsteadyCdList.pushBack(Cd);
+            unsteadyCmList.pushBack(Cm);
+            unsteadyCirculationList.pushBack(this.spatialDisc_.circulation_);
+        }
+        
+        writeln("\n=== SIMULATION COMPLETE ===");
+        writeln("  Total time steps: ", timeStepCount);
+        writeln("  Final physical time: ", physicalTime);
+        
+        // Write final solution with unsteady history
+        this.spatialDisc_.writeSolutionUnsteady(
+            this.timeList_, this.itList_, this.resList_, this.clList_, this.cdList_, this.cmList_, this.circulationList_,
+            unsteadyTimeList, unsteadyStepList, unsteadyAlphaList, unsteadyClList, unsteadyCdList, unsteadyCmList
+        );
     }
 
     proc solve() {
@@ -703,9 +897,7 @@ class unsteadyTemporalDiscretization {
 
         // Initial residual
         res = RMSE(this.spatialDisc_.res_, this.spatialDisc_.elemVolume_);
-        if this.inputs_.START_FILENAME_ == "" {
-            this.first_res_ = res;
-        }
+        this.first_res_ = res;
         normalized_res = res / this.first_res_;
         const res_wall = RMSE(this.spatialDisc_.res_[this.spatialDisc_.wall_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.wall_dom]);
         const res_fluid = RMSE(this.spatialDisc_.res_[this.spatialDisc_.fluid_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.fluid_dom]);
@@ -758,39 +950,12 @@ class unsteadyTemporalDiscretization {
             forall elem in 1..this.spatialDisc_.nelemDomain_ {
                 this.b_petsc.set(elem-1, -this.spatialDisc_.res_[elem]);
             }
+            // Add Kutta condition residual to RHS
             this.b_petsc.set(this.gammaIndex_, -this.spatialDisc_.kutta_res_);
             this.b_petsc.assemblyComplete();
 
-            var its: int;
-            var reason: int;
-            
-            // === ADAPTIVE (INEXACT) NEWTON: Eisenstat-Walker forcing terms ===
-            // Idea: Use loose inner tolerance early (save GMRES iterations), 
-            //       tighten as outer residual decreases for quadratic convergence
-            // Reference: Eisenstat & Walker, SIAM J. Sci. Comput. 17(1), 1996
-            var current_rtol = this.inputs_.GMRES_RTOL_;
-            if this.inputs_.ADAPTIVE_GMRES_TOL_ && normalized_res < 1e12 {
-                // Eisenstat-Walker Choice 1: eta_k = |r_k - r_{k-1}| / |r_{k-1}|
-                // Simplified version: eta = eta_max * (res / first_res)^gamma
-                // This gives loose tolerance early and tight tolerance near convergence
-                const eta = this.inputs_.GMRES_RTOL_ETA_;
-                current_rtol = max(this.inputs_.GMRES_RTOL_MIN_,
-                                   min(this.inputs_.GMRES_RTOL_MAX_, 
-                                       eta * normalized_res));
-                // Update tolerances in solvers
-                if this.inputs_.USE_NATIVE_GMRES_ {
-                    this.nativeGmres_.setTolerance(current_rtol, this.inputs_.GMRES_ATOL_);
-                } else {
-                    this.ksp.setTolerances(current_rtol, this.inputs_.GMRES_ATOL_, 
-                                          this.inputs_.GMRES_DTOL_, this.inputs_.GMRES_MAXIT_);
-                }
-            }
-
             // === PETSC GMRES ===
-            const (petscIts, petscReason) = GMRES(this.ksp, this.A_petsc, this.b_petsc, this.x_petsc);
-            its = petscIts;
-            reason = petscReason;
-            
+            const (its, reason) = GMRES(this.ksp, this.A_petsc, this.b_petsc, this.x_petsc);
             
             var lineSearchIts = 0;
             omega = this.inputs_.OMEGA_;
@@ -812,9 +977,16 @@ class unsteadyTemporalDiscretization {
                     forall elem in 1..this.spatialDisc_.nelemDomain_ {
                         this.spatialDisc_.phi_[elem] = phi_backup[elem] + omega * this.x_petsc.get(elem-1);
                     }
+                    // Update circulation
                     this.spatialDisc_.circulation_ = circulation_backup + omega * this.x_petsc.get(this.gammaIndex_);
                     
-                    // Compute new residual
+                    // Update ALL coupled wake faces to current circulation
+                    // In quasi-steady mode, all faces are coupled; in unsteady mode, only the first nCoupledWakeFaces_
+                    if this.spatialDisc_.wake_face_dom.size > 0 {
+                        for i in 1..this.nCoupledWakeFaces_ {
+                            this.spatialDisc_.wakeFaceGamma_[i] = this.spatialDisc_.circulation_;
+                        }
+                    }
                     this.spatialDisc_.run();
                     res = RMSE(this.spatialDisc_.res_, this.spatialDisc_.elemVolume_);
                     
@@ -836,7 +1008,14 @@ class unsteadyTemporalDiscretization {
                 forall elem in 1..this.spatialDisc_.nelemDomain_ {
                     this.spatialDisc_.phi_[elem] += omega * this.x_petsc.get(elem-1);
                 }
+                // Update circulation
                 this.spatialDisc_.circulation_ += omega * this.x_petsc.get(this.gammaIndex_);
+                // Update ALL coupled wake faces to current circulation
+                if this.spatialDisc_.wake_face_dom.size > 0 {
+                    for i in 1..this.nCoupledWakeFaces_ {
+                        this.spatialDisc_.wakeFaceGamma_[i] = this.spatialDisc_.circulation_;
+                    }
+                }
                 
                 // Compute residual for convergence check
                 this.spatialDisc_.run();
@@ -854,20 +1033,12 @@ class unsteadyTemporalDiscretization {
             const (Cl, Cd, Cm) = this.spatialDisc_.computeAerodynamicCoefficients();
             time.stop();
             const elapsed = time.elapsed() + this.t0_;
-            if this.inputs_.ADAPTIVE_GMRES_TOL_ {
-                writeln(" Time: ", elapsed, " It: ", this.it_,
-                        " res: ", res, " norm res: ", normalized_res, " kutta res: ", this.spatialDisc_.kutta_res_,
-                        " res wall: ", res_wall, " res fluid: ", res_fluid, " res wake: ", res_wake, " res shock: ", res_shock,
-                        " Cl: ", Cl, " Cd: ", Cd, " Cm: ", Cm, " Circulation: ", this.spatialDisc_.circulation_,
-                        " GMRES its: ", its, " reason: ", reason, " omega: ", omega, " LS its: ", lineSearchIts,
-                        " GMRES rtol: ", current_rtol);
-            } else {
-                writeln(" Time: ", elapsed, " It: ", this.it_,
-                        " res: ", res, " norm res: ", normalized_res, " kutta res: ", this.spatialDisc_.kutta_res_,
-                        " res wall: ", res_wall, " res fluid: ", res_fluid, " res wake: ", res_wake, " res shock: ", res_shock,
-                        " Cl: ", Cl, " Cd: ", Cd, " Cm: ", Cm, " Circulation: ", this.spatialDisc_.circulation_,
-                        " GMRES its: ", its, " reason: ", reason, " omega: ", omega, " LS its: ", lineSearchIts);
-            }
+            writeln(" Time: ", elapsed, " It: ", this.it_,
+                    " res: ", res, " norm res: ", normalized_res, " kutta res: ", this.spatialDisc_.kutta_res_,
+                    " res wall: ", res_wall, " res fluid: ", res_fluid, " res wake: ", res_wake, " res shock: ", res_shock,
+                    " Cl: ", Cl, " Cd: ", Cd, " Cm: ", Cm, " Circulation: ", this.spatialDisc_.circulation_,
+                    " GMRES its: ", its, " reason: ", reason, " omega: ", omega, " LS its: ", lineSearchIts);
+            
 
             this.timeList_.pushBack(elapsed);
             this.itList_.pushBack(this.it_);

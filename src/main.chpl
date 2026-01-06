@@ -85,10 +85,10 @@ proc main() {
             }
             else if inputs.FLOW_ == "unsteady" {
                 var spatialDisc = new shared unsteadySpatialDiscretization(Mesh, inputs);
-                var unsteadySolver = new shared unsteadyTemporalDiscretization(spatialDisc, inputs);
+                // var unsteadySolver = new shared unsteadyTemporalDiscretization(spatialDisc, inputs);
 
-                // Use the full unsteady time-stepping loop with oscillating alpha
-                unsteadySolver.solveUnsteady();
+                // // Use the full unsteady time-stepping loop with oscillating alpha
+                // unsteadySolver.solveUnsteady();
             }
         }
 
