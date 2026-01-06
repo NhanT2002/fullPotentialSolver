@@ -24,6 +24,7 @@ class unsteadySpatialDiscretization {
 
     var elemDomain_dom: domain(1) = {1..0};
     var res_: [elemDomain_dom] real(64);
+    var resPhi_: [elemDomain_dom] real(64);
     var kutta_res_: real(64);
 
     var elem_dom: domain(1) = {1..0};
@@ -44,6 +45,10 @@ class unsteadySpatialDiscretization {
     var kuttaCell_: [elem_dom] int; // 1 if over wake, -1 if under wake, 9 otherwise
     var machmach_: [elem_dom] real(64);
     var mumu_: [elem_dom] real(64);
+
+    var phi_m1_: [elem_dom] real(64); // phi at previous time step
+    var rhorho_m1_: [elem_dom] real(64); // rho at previous time step
+
 
     
     var TEnode_: int;
@@ -102,6 +107,8 @@ class unsteadySpatialDiscretization {
     var wakeFaceY_: [wake_face_dom] real(64);
     var wakeFaceZ_: [wake_face_dom] real(64);
     var wakeFaceGamma_: [wake_face_dom] real(64);
+    var wakeFaceGamma_m1_: [wake_face_dom] real(64);
+    var resWake_: [wake_face_dom] real(64);
 
     var wall_dom: sparse subdomain(elemDomain_dom); // cell next to wall boundary
     var fluid_dom: sparse subdomain(elemDomain_dom); // all other cells without wall_dom
@@ -402,6 +409,7 @@ class unsteadySpatialDiscretization {
                     this.rhorho_[elem] = rho[elem];
                 }
                 this.circulation_ = circulation.last;
+                this.wakeFaceGamma_m1_ = wakeGamma;
             }
         }
         else {
@@ -416,13 +424,17 @@ class unsteadySpatialDiscretization {
             }
         }
 
-        this.updateGhostCellsPhi();
+        forall elem in 1..this.nelem_ {
+            this.phi_m1_[elem] = this.phi_[elem];
+            this.rhorho_m1_[elem] = this.rhorho_[elem];
+        }
+
+        this.updateGhostCellsPhiandRho();
         this.computeVelocityFromPhiLeastSquaresQR();
-        this.computeDensityFromVelocity();
         this.updateGhostCellsVelocity();
     }
 
-    proc updateGhostCellsPhi() {
+    proc updateGhostCellsPhiandRho() {
         // Update ghost cell phi values based on boundary conditions
         inline proc updateWallGhostPhi(face: int) {
             const elem1 = this.mesh_.edge2elem_[1, face];
@@ -434,6 +446,7 @@ class unsteadySpatialDiscretization {
             
             // For wall boundary, mirror the potential to get zero normal gradient
             this.phi_[ghostElem] = this.phi_[interiorElem];
+            this.rhorho_[ghostElem] = this.rhorho_[interiorElem];
         }
 
         inline proc updateFarfieldGhostPhi(face: int) {
@@ -454,6 +467,7 @@ class unsteadySpatialDiscretization {
             // this.phi_[ghostElem] = this.inputs_.U_INF_ * x + this.inputs_.V_INF_ * y + this.circulation_ * theta / (2.0 * pi);
             
             this.phi_[ghostElem] = this.inputs_.U_INF_ * x + this.inputs_.V_INF_ * y;
+            this.rhorho_[ghostElem] = this.inputs_.RHO_INF_;
         }
         
         forall face in this.mesh_.edgeWall_ do updateWallGhostPhi(face);
@@ -522,78 +536,15 @@ class unsteadySpatialDiscretization {
         forall face in this.mesh_.edgeFarfield_ do updateFarfieldGhostVelocity(face);
     }
 
-    proc computeGradientGreenGauss(ref phi: [] real(64), 
-                                    ref gradX: [] real(64), 
-                                    ref gradY: [] real(64)) {
-        // Phase 1: Compute and store flux at each face (parallel, no races)
-        // Flux direction follows normal: FROM elem1 TO elem2
-        forall face in 1..this.nface_ {
-            const elem1 = this.mesh_.edge2elem_[1, face];
-            const elem2 = this.mesh_.edge2elem_[2, face];
-            
-            // Distance-weighted interpolation to face centroid
-            const fcx = this.faceCentroidX_[face];
-            const fcy = this.faceCentroidY_[face];
-            
-            const dx1 = fcx - this.elemCentroidX_[elem1];
-            const dy1 = fcy - this.elemCentroidY_[elem1];
-            const d1 = sqrt(dx1*dx1 + dy1*dy1);
-            
-            const dx2 = fcx - this.elemCentroidX_[elem2];
-            const dy2 = fcy - this.elemCentroidY_[elem2];
-            const d2 = sqrt(dx2*dx2 + dy2*dy2);
-            
-            // φ_face = (d2 * φ1 + d1 * φ2) / (d1 + d2)
-            // This interpolates to the actual face centroid location
-            const phiFace = (d2 * phi[elem1] + d1 * phi[elem2]) / (d1 + d2);
-            
-            // Face flux: φ_face * n * A (positive in normal direction)
-            this.faceFluxX_[face] = phiFace * this.faceNormalX_[face] * this.faceArea_[face];
-            this.faceFluxY_[face] = phiFace * this.faceNormalY_[face] * this.faceArea_[face];
-        }
-        
-        // Phase 2: Gather fluxes per element with sign correction (parallel)
-        // Normal points FROM elem1 TO elem2, so:
-        //   - For elem1: flux is outward → add
-        //   - For elem2: flux is inward → subtract
-        forall elem in 1..this.nelemDomain_ {
-            const faces = this.mesh_.elem2edge_[this.mesh_.elem2edgeIndex_[elem] + 1 .. this.mesh_.elem2edgeIndex_[elem + 1]];
-            var gx = 0.0, gy = 0.0;
-            for face in faces {
-                const elem1 = this.mesh_.edge2elem_[1, face];
-                
-                // Sign: +1 if we are elem1 (normal points outward), -1 if we are elem2
-                const sign = if elem1 == elem then 1.0 else -1.0;
-                
-                gx += sign * this.faceFluxX_[face];
-                gy += sign * this.faceFluxY_[face];
-            }
-            
-            const invVol = 1.0 / this.elemVolume_[elem];
-            gradX[elem] = gx * invVol;
-            gradY[elem] = gy * invVol;
-        }
-    }
-
-    proc computeVelocityFromPhi() {
-        computeGradientGreenGauss(this.phi_, this.uu_, this.vv_);
-    }
-
-    proc computeVelocityFromPhiLeastSquares() {
-        this.lsGrad_!.computeGradient(this.phi_, this.uu_, this.vv_, this.elemCentroidX_, this.elemCentroidY_);
-    }
-
     proc computeVelocityFromPhiLeastSquaresQR() {
-        this.lsGradQR_!.computeGradient(this.phi_, this.uu_, this.vv_, this.kuttaCell_, this.circulation_);
+        this.lsGradQR_!.computeGradient(this.phi_, this.uu_, this.vv_, this.kuttaCell_, this.wakeFace2index_, this.wakeFaceGamma_);
         // Compute velocity gradients for reconstruction
         this.lsGradQR_!.computeGradient(this.uu_, this.graduuX_, this.graduuY_);
         this.lsGradQR_!.computeGradient(this.vv_, this.gradvvX_, this.gradvvY_);
     }
 
-    proc computeDensityFromVelocity() {
+    proc computeUpwindMu() {
         forall elem in 1..this.nelemDomain_ {
-            this.rhorho_[elem] = (1.0 + this.gamma_minus_one_over_two_ * this.inputs_.MACH_ * this.inputs_.MACH_ * 
-                                 (1.0 - this.uu_[elem] * this.uu_[elem] - this.vv_[elem] * this.vv_[elem])) ** this.one_over_gamma_minus_one_;
             this.machmach_[elem] = this.mach(this.uu_[elem], this.vv_[elem], this.rhorho_[elem]);
             
             // Linear switching function:
@@ -612,7 +563,6 @@ class unsteadySpatialDiscretization {
                 if elem1 <= this.nelemDomain_ then (elem1, elem2) else (elem2, elem1);
 
             // Copy interior density to ghost cell
-            this.rhorho_[ghostElem] = this.rhorho_[interiorElem];
             this.machmach_[ghostElem] = this.machmach_[interiorElem];
             this.mumu_[ghostElem] = this.mumu_[interiorElem];
         }
@@ -695,11 +645,23 @@ class unsteadySpatialDiscretization {
             if (kuttaType1 == 1 && kuttaType2 == -1) {
                 // elem1 is above wake, elem2 is below wake
                 // To get continuous potential, add Γ to lower surface value
-                phi2 += this.circulation_;
+                try {
+                    const wakeIndex = this.wakeFace2index_[face];
+                    const gammaWake = this.wakeFaceGamma_[wakeIndex];
+                    phi2 -= gammaWake;
+                } catch e: Error {
+                    halt("Error: Face ", face, " not found in wakeFace2index map.");
+                }
             } else if (kuttaType1 == -1 && kuttaType2 == 1) {
                 // elem1 is below wake, elem2 is above wake
                 // To get continuous potential, subtract Γ from upper surface value
-                phi2 -= this.circulation_;
+                try {
+                    const wakeIndex = this.wakeFace2index_[face];
+                    const gammaWake = this.wakeFaceGamma_[wakeIndex];
+                    phi2 += gammaWake;
+                } catch e: Error {
+                    halt("Error: Face ", face, " not found in wakeFace2index map.");
+                }
             }
 
             // Directional derivative of phi (direct difference with jump correction)
@@ -716,16 +678,7 @@ class unsteadySpatialDiscretization {
             const vFace = vAvg - delta * this.corrCoeffY_[face];
             
             // Isentropic density from Bernoulli equation
-            var rhoFace = (1.0 + this.gamma_minus_one_over_two_ * this.inputs_.MACH_ * this.inputs_.MACH_ * 
-                             (1.0 - uFace * uFace - vFace * vFace)) ** this.one_over_gamma_minus_one_;
-
-            // // Padé approximation for density at high Mach numbers
-            // const q = sqrt(uFace * uFace + vFace * vFace);
-            // if q >= this.inputs_.q_crit_ {
-            //     const beta = this.inputs_.beta_crit_;
-            //     const rhoCrit = this.inputs_.rho_crit_;
-            //     rhoFace = rhoCrit / (1.0 + beta * (q / this.inputs_.q_crit_ - 1.0) );
-            // }
+            const rhoFace = 0.5*(this.rhorho_[elem1] + this.rhorho_[elem2]);
 
             // Store face quantities
             this.uFace_[face] = uFace;
@@ -800,14 +753,6 @@ class unsteadySpatialDiscretization {
         }
     }
 
-    // Lightweight flux computation for Jv - skips machFace and velMagFace
-    proc computeFluxes_jv() {
-        forall face in 1..this.nface_ {
-            this.flux_[face] = this.rhoFace_[face] * (this.uFace_[face] * this.faceNormalX_[face] 
-                            + this.vFace_[face] * this.faceNormalY_[face]) * this.faceArea_[face];
-        }
-    }
-
     proc computeResiduals() {
         // Compute residuals per element from face fluxes
         forall elem in 1..this.nelemDomain_ {
@@ -821,61 +766,35 @@ class unsteadySpatialDiscretization {
 
                 res += sign * this.flux_[face];
             }
-            this.res_[elem] = res * this.res_scale_;
-        }
+            this.res_[elem] = this.elemVolume_[elem] * (this.rhorho_[elem] - this.rhorho_m1_[elem]) / this.inputs_.TIME_STEP_  
+                                + res;
 
-        // Kutta condition residual: R_Γ = Γ - Γ_computed
-        // We want Γ to equal the computed value from the potential field
-        // R_Γ = Γ_current - (φ_upper - φ_lower) should go to zero
-        // Extrapolated phi at upper and lower TE elem
-        const phi_upper = this.phi_[this.upperTEelem_] + (this.uu_[this.upperTEelem_] * this.deltaSupperTEx_ + this.vv_[this.upperTEelem_] * this.deltaSupperTEy_);
-        const phi_lower = this.phi_[this.lowerTEelem_] + (this.uu_[this.lowerTEelem_] * this.deltaSlowerTEx_ + this.vv_[this.lowerTEelem_] * this.deltaSlowerTEy_);
-        const gamma_computed = phi_upper - phi_lower;
-        this.kutta_res_ = (this.circulation_ - gamma_computed) * this.res_scale_;
+            this.resPhi_[elem] = this.elemVolume_[elem] * ((this.phi_[elem] - this.phi_m1_[elem]) / this.inputs_.TIME_STEP_ 
+                                + 0.5*(this.uu_[elem]**2 + this.vv_[elem]**2 - 1) + 
+                                (this.rhorho_[elem]**(this.inputs_.GAMMA_-1) - 1) / ((this.inputs_.GAMMA_-1)*this.inputs_.MACH_**2));
+        }
+        forall (i, face) in zip(this.wake_face_dom, this.wakeFace_) {
+            const elem1 = this.mesh_.edge2elem_[1, face];
+            const elem2 = this.mesh_.edge2elem_[2, face];
+            const kuttaType1 = this.kuttaCell_[elem1];
+            const kuttaType2 = this.kuttaCell_[elem2];
+            const (upperElem, lowerElem) = 
+                if kuttaType1 == 1 && kuttaType2 == -1 then (elem1, elem2) else (elem2, elem1);
+            this.resWake_[i] = (this.wakeFaceGamma_[i] - this.wakeFaceGamma_m1_[i]) / this.inputs_.TIME_STEP_ +
+                                0.5*(this.uu_[upperElem]**2 + this.vv_[upperElem]**2 - 
+                                     this.uu_[lowerElem]**2 - this.vv_[lowerElem]**2);
+        }
     }
 
     proc run() {
-        this.updateGhostCellsPhi();         // Update ghost phi values for gradient computation
+        this.updateGhostCellsPhiandRho();         // Update ghost phi and rho values for gradient computation
         this.computeVelocityFromPhiLeastSquaresQR();
-        this.computeDensityFromVelocity();
         this.updateGhostCellsVelocity();    // Update ghost velocities for flux computation
         this.computeFaceProperties();
+        this.computeUpwindMu();
         this.artificialDensity();
         this.computeFluxes();
         this.computeResiduals();
-    }
-
-    // Lightweight run for Jacobian-vector products - skips machmach/mumu computation
-    // These are only needed for upwinding in artificialDensity, which uses the upwind
-    // cell's mumu value. For finite difference Jv, we can reuse the mumu from the
-    // base state since the perturbation is small.
-    proc run_jv() {
-        this.updateGhostCellsPhi();         // Update ghost phi values for gradient computation
-        this.computeVelocityFromPhiLeastSquaresQR();
-        this.computeDensityFromVelocity();
-        this.updateGhostCellsVelocity();    // Update ghost velocities for flux computation
-        this.computeFaceProperties();
-        this.artificialDensity();
-        this.computeFluxes();
-        this.computeResiduals();
-    }
-
-    // Lightweight density computation - skips machmach and mumu (reuse from base state)
-    proc computeDensityFromVelocity_jv() {
-        forall elem in 1..this.nelemDomain_ {
-            this.rhorho_[elem] = (1.0 + this.gamma_minus_one_over_two_ * this.inputs_.MACH_ * this.inputs_.MACH_ * 
-                                 (1.0 - this.uu_[elem] * this.uu_[elem] - this.vv_[elem] * this.vv_[elem])) ** this.one_over_gamma_minus_one_;
-            // Skip machmach and mumu - they're only needed for upwinding direction
-            // and we reuse the values from the unperturbed state
-        }
-
-        forall face in this.mesh_.edgeWall_ {
-            const elem1 = this.mesh_.edge2elem_[1, face];
-            const elem2 = this.mesh_.edge2elem_[2, face];
-            const (interiorElem, ghostElem) = 
-                if elem1 <= this.nelemDomain_ then (elem1, elem2) else (elem2, elem1);
-            this.rhorho_[ghostElem] = this.rhorho_[interiorElem];
-        }
     }
 
     proc computeAerodynamicCoefficients() {
@@ -924,6 +843,8 @@ class unsteadySpatialDiscretization {
         var gradRhoY: [dom] real(64);
         var pp: [dom] real(64);
         var resres: [dom] real(64);
+        var resPhi: [dom] real(64);
+        var resWake: [dom] real(64);
         var machmach: [dom] real(64);
         var xElem: [dom] real(64);
         var yElem: [dom] real(64);
@@ -941,12 +862,21 @@ class unsteadySpatialDiscretization {
             gradRhoX[elem-1] = this.gradRhoX_[elem];
             gradRhoY[elem-1] = this.gradRhoY_[elem];
             pp[elem-1] = (this.rhorho_[elem]**this.inputs_.GAMMA_ / (this.inputs_.GAMMA_ * this.inputs_.MACH_ * this.inputs_.MACH_ * this.inputs_.P_INF_) - 1 ) / (this.inputs_.GAMMA_/2*this.inputs_.MACH_**2);
-            resres[elem-1] = abs(this.res_[elem] / this.res_scale_);
+            resres[elem-1] = abs(this.res_[elem]);
+            resPhi[elem-1] = abs(this.resPhi_[elem]);
             machmach[elem-1] = this.mach(this.uu_[elem], this.vv_[elem], this.rhorho_[elem]);
             xElem[elem-1] = this.elemCentroidX_[elem];
             yElem[elem-1] = this.elemCentroidY_[elem];
             kuttaCell[elem-1] = this.kuttaCell_[elem];
         }
+
+        forall (i, face) in zip(this.wake_face_dom, this.wakeFace_) {
+            const elem1 = this.mesh_.edge2elem_[1, face];
+            const elem2 = this.mesh_.edge2elem_[2, face];
+            resWake[elem1-1] = abs(this.resWake_[i]);
+            resWake[elem2-1] = abs(this.resWake_[i]);
+        }
+
 
         var fields = new map(string, [dom] real(64));
         fields["phi"] = phi;
@@ -962,6 +892,8 @@ class unsteadySpatialDiscretization {
         fields["gradRhoY"] = gradRhoY;
         fields["cp"] = pp;
         fields["res"] = resres;
+        fields["resPhi"] = resPhi;
+        fields["resWake"] = resWake;
         fields["mach"] = machmach;
         fields["xElem"] = xElem;
         fields["yElem"] = yElem;
@@ -1091,6 +1023,8 @@ class unsteadySpatialDiscretization {
         var gradRhoY: [dom] real(64);
         var pp: [dom] real(64);
         var resres: [dom] real(64);
+        var resPhi: [dom] real(64);
+        var resWake: [dom] real(64);
         var machmach: [dom] real(64);
         var xElem: [dom] real(64);
         var yElem: [dom] real(64);
@@ -1108,12 +1042,21 @@ class unsteadySpatialDiscretization {
             gradRhoX[elem-1] = this.gradRhoX_[elem];
             gradRhoY[elem-1] = this.gradRhoY_[elem];
             pp[elem-1] = (this.rhorho_[elem]**this.inputs_.GAMMA_ / (this.inputs_.GAMMA_ * this.inputs_.MACH_ * this.inputs_.MACH_ * this.inputs_.P_INF_) - 1 ) / (this.inputs_.GAMMA_/2*this.inputs_.MACH_**2);
-            resres[elem-1] = abs(this.res_[elem] / this.res_scale_);
+            resres[elem-1] = abs(this.res_[elem]);
+            resPhi[elem-1] = abs(this.resPhi_[elem]);
             machmach[elem-1] = this.mach(this.uu_[elem], this.vv_[elem], this.rhorho_[elem]);
             xElem[elem-1] = this.elemCentroidX_[elem];
             yElem[elem-1] = this.elemCentroidY_[elem];
             kuttaCell[elem-1] = this.kuttaCell_[elem];
         }
+
+        forall (i, face) in zip(this.wake_face_dom, this.wakeFace_) {
+            const elem1 = this.mesh_.edge2elem_[1, face];
+            const elem2 = this.mesh_.edge2elem_[2, face];
+            resWake[elem1-1] = abs(this.resWake_[i]);
+            resWake[elem2-1] = abs(this.resWake_[i]);
+        }
+
 
         var fields = new map(string, [dom] real(64));
         fields["phi"] = phi;
@@ -1129,6 +1072,8 @@ class unsteadySpatialDiscretization {
         fields["gradRhoY"] = gradRhoY;
         fields["cp"] = pp;
         fields["res"] = resres;
+        fields["resPhi"] = resPhi;
+        fields["resWake"] = resWake;
         fields["mach"] = machmach;
         fields["xElem"] = xElem;
         fields["yElem"] = yElem;

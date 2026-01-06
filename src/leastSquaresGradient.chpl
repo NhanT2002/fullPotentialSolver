@@ -492,8 +492,8 @@ class LeastSquaresGradientQR {
                     // φ_seen = φ_lower + Γ = φ_upper
                     try {
                         const wakeIndex = wakeFace2index[face];
-                        const circulation_ = wakeFaceGamma[wakeIndex];
-                        phiJ += circulation_;
+                        const gamma = wakeFaceGamma[wakeIndex];
+                        phiJ -= gamma;
                     }
                     catch e: Error {
                         halt("Error: Face ", face, " not found in wakeFace2index map.");
@@ -504,8 +504,8 @@ class LeastSquaresGradientQR {
                     // φ_seen = φ_upper - Γ = φ_lower
                     try {
                         const wakeIndex = wakeFace2index[face];
-                        const circulation_ = wakeFaceGamma[wakeIndex];
-                        phiJ -= circulation_;
+                        const gamma = wakeFaceGamma[wakeIndex];
+                        phiJ += gamma;
                     }
                     catch e: Error {
                         halt("Error: Face ", face, " not found in wakeFace2index map.");

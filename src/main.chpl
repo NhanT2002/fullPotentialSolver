@@ -85,6 +85,17 @@ proc main() {
             }
             else if inputs.FLOW_ == "unsteady" {
                 var spatialDisc = new shared unsteadySpatialDiscretization(Mesh, inputs);
+                spatialDisc.initializeMetrics();
+                spatialDisc.initializeKuttaCells();
+                spatialDisc.initializeSolution();
+                spatialDisc.run();
+                spatialDisc.writeSolution();
+
+                const res = RMSE(spatialDisc.res_, spatialDisc.elemVolume_);
+                const resPhi = RMSE(spatialDisc.resPhi_, spatialDisc.elemVolume_);
+                const resWake = RMSE(spatialDisc.resWake_);
+
+                writeln("Initial Residuals - Total: ", res, ", Phi: ", resPhi, ", Wake: ", resWake);
                 // var unsteadySolver = new shared unsteadyTemporalDiscretization(spatialDisc, inputs);
 
                 // // Use the full unsteady time-stepping loop with oscillating alpha
