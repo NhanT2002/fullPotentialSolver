@@ -106,6 +106,7 @@ class unsteadySpatialDiscretization {
     var lsGradQR_: owned LeastSquaresGradientQR?;
 
     var circulation_ : real(64);
+    var circulation_m1_ : real(64);  // Previous time step circulation for vortex shedding
     var wake_face_dom: domain(1) = {1..0};
     var wakeFace_: [wake_face_dom] int;
     var wakeFace2index_: map(int, int);
@@ -113,6 +114,7 @@ class unsteadySpatialDiscretization {
     var wakeFaceY_: [wake_face_dom] real(64);
     var wakeFaceZ_: [wake_face_dom] real(64);
     var wakeFaceGamma_: [wake_face_dom] real(64);
+    var TEwakeFace_: int = -1;  // Face ID of the trailing edge wake face (first in sorted list)
 
     var wall_dom: sparse subdomain(elemDomain_dom); // cell next to wall boundary
     var fluid_dom: sparse subdomain(elemDomain_dom); // all other cells without wall_dom
@@ -391,6 +393,10 @@ class unsteadySpatialDiscretization {
         for i in this.wake_face_dom {
             this.wakeFace2index_[this.wakeFace_[i]] = i;
         }
+        // Store the trailing edge wake face (first in sorted list by x-coordinate)
+        if this.wake_face_dom.size > 0 {
+            this.TEwakeFace_ = this.wakeFace_[1];
+        }
         
 
         this.deltaSupperTEx_ = this.TEnodeXcoord_ - this.elemCentroidX_[this.upperTEelem_];
@@ -667,16 +673,27 @@ class unsteadySpatialDiscretization {
             
             // Apply circulation correction for wake-crossing faces
             // From elem1's perspective looking at elem2
+            // Use per-face wakeFaceGamma for unsteady vortex shedding
             const kuttaType1 = this.kuttaCell_[elem1];
             const kuttaType2 = this.kuttaCell_[elem2];
             if (kuttaType1 == 1 && kuttaType2 == -1) {
                 // elem1 is above wake, elem2 is below wake
                 // To get continuous potential, add Γ to lower surface value
-                phi2 += this.circulation_;
+                try {
+                    const wakeIndex = this.wakeFace2index_[face];
+                    phi2 += this.wakeFaceGamma_[wakeIndex];
+                } catch e: Error {
+                    halt("Error: Face ", face, " not found in wakeFace2index map.");
+                }
             } else if (kuttaType1 == -1 && kuttaType2 == 1) {
                 // elem1 is below wake, elem2 is above wake
                 // To get continuous potential, subtract Γ from upper surface value
-                phi2 -= this.circulation_;
+                try {
+                    const wakeIndex = this.wakeFace2index_[face];
+                    phi2 -= this.wakeFaceGamma_[wakeIndex];
+                } catch e: Error {
+                    halt("Error: Face ", face, " not found in wakeFace2index map.");
+                }
             }
 
             // Directional derivative of phi (direct difference with jump correction)
@@ -791,7 +808,8 @@ class unsteadySpatialDiscretization {
         // Extrapolated phi at upper and lower TE elem
         const phi_upper = this.phi_[this.upperTEelem_] + (this.uu_[this.upperTEelem_] * this.deltaSupperTEx_ + this.vv_[this.upperTEelem_] * this.deltaSupperTEy_);
         const phi_lower = this.phi_[this.lowerTEelem_] + (this.uu_[this.lowerTEelem_] * this.deltaSlowerTEx_ + this.vv_[this.lowerTEelem_] * this.deltaSlowerTEy_);
-        this.circulation_ = phi_upper - phi_lower;
+        const gamma_computed = phi_upper - phi_lower;
+        this.kutta_res_ = this.circulation_ - gamma_computed;
     }
 
     proc run() {
@@ -802,6 +820,66 @@ class unsteadySpatialDiscretization {
         this.artificialDensity();
         this.computeFluxes();
         this.computeResiduals();
+    }
+
+    /*
+     * Advance wake vortices downstream for unsteady flow.
+     * At the start of each physical time step:
+     * 1. Store current circulation as circulation_m1_
+     * 2. Calculate convection distance: Δx = U_∞ * Δt
+     * 3. Determine how many wake faces this corresponds to
+     * 4. Shift wakeFaceGamma values downstream by that number of positions
+     * 5. Fill newly exposed faces at TE with current circulation
+     * 
+     * This models Kelvin's theorem: d(Γ_airfoil + Γ_wake)/dt = 0
+     * When airfoil circulation changes, vorticity is shed at the trailing edge
+     * and convects downstream with the flow.
+     */
+    proc advanceWakeVortices() {
+        if this.wake_face_dom.size == 0 {
+            return;
+        }
+        
+        // Store current circulation for next time step reference
+        this.circulation_m1_ = this.circulation_;
+        
+        // Calculate convection distance: Δx = U_∞ * Δt
+        // U_∞ is non-dimensionalized to 1.0, so Δx = Δt (in chord lengths)
+        const convectionDistance = this.inputs_.TIME_STEP_;  // * U_INF = 1.0
+        
+        // Calculate average wake face spacing
+        // wakeFace_ is sorted by x-coordinate, wakeFaceX_[1] is at TE, wakeFaceX_[n] is furthest downstream
+        const wakeLength = this.wakeFaceX_[this.wake_face_dom.size] - this.wakeFaceX_[1];
+        const numWakeFaces = this.wake_face_dom.size;
+        const avgSpacing = if numWakeFaces > 1 then wakeLength / (numWakeFaces - 1) else 1.0;
+        
+        // Number of positions to shift (integer part)
+        var nShift = (convectionDistance / avgSpacing): int;
+        if nShift < 1 {
+            nShift = 1;  // At least shift by 1 per time step
+        }
+        if nShift >= numWakeFaces {
+            // Convection distance exceeds wake length - set all to current circulation
+            this.wakeFaceGamma_ = this.circulation_;
+            return;
+        }
+        
+        // Shift wake gamma values downstream by nShift positions
+        // wakeFace_ is sorted by x-coordinate, so index 1 is at TE (smallest x)
+        // and index n is furthest downstream (largest x)
+        // Shifting downstream means: face[i] gets value from face[i - nShift]
+        // We must iterate backwards to avoid overwriting values before copying them
+        // NOTE: Chapel range "high..low by -1" is EMPTY; must use while loop
+        var i = numWakeFaces;
+        while i >= nShift + 1 {
+            this.wakeFaceGamma_[i] = this.wakeFaceGamma_[i - nShift];
+            i -= 1;
+        }
+        
+        // Fill newly exposed faces at TE (first nShift faces) with current circulation
+        for j in 1..nShift {
+            this.wakeFaceGamma_[j] = this.circulation_;
+        }
     }
 
     proc computeAerodynamicCoefficients() {
@@ -1004,6 +1082,33 @@ class unsteadySpatialDiscretization {
         fieldsWake["gammaWake"] = gammaWake;
 
         writer.writeWakeToCGNS(this.wakeFaceX_, this.wakeFaceY_, this.wakeFaceZ_, wake_dom, fieldsWake);
+    }
+
+    /*
+     * Write solution with unsteady history (for oscillating airfoil simulations).
+     * In addition to the regular convergence history, this also writes the 
+     * time-step-level unsteady history (time, alpha, Cl, Cd, Cm).
+     */
+    proc writeSolutionUnsteady(timeList: list(real(64)), 
+                               itList: list(int), 
+                               resList: list(real(64)), 
+                               clList: list(real(64)), 
+                               cdList: list(real(64)), 
+                               cmList: list(real(64)),
+                               circulationList: list(real(64)),
+                               unsteadyTimeList: list(real(64)),
+                               unsteadyStepList: list(int),
+                               unsteadyAlphaList: list(real(64)),
+                               unsteadyClList: list(real(64)),
+                               unsteadyCdList: list(real(64)),
+                               unsteadyCmList: list(real(64))) {
+        // First write the standard solution
+        this.writeSolution(timeList, itList, resList, clList, cdList, cmList, circulationList);
+        
+        // Then append the unsteady history
+        var writer = new owned potentialFlowWriter_c(this.inputs_.OUTPUT_FILENAME_);
+        writer.writeUnsteadyHistory(unsteadyTimeList, unsteadyStepList, unsteadyAlphaList, 
+                                    unsteadyClList, unsteadyCdList, unsteadyCmList);
     }
 
     proc writeSolution() {

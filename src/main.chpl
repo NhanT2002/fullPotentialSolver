@@ -87,8 +87,8 @@ proc main() {
                 var spatialDisc = new shared unsteadySpatialDiscretization(Mesh, inputs);
                 var unsteadySolver = new shared unsteadyTemporalDiscretization(spatialDisc, inputs);
 
-                unsteadySolver.initialize();
-                unsteadySolver.solve();
+                // Use the full unsteady time-stepping loop with oscillating alpha
+                unsteadySolver.solveUnsteady();
             }
         }
 

@@ -3,6 +3,8 @@ import json
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from PIL import Image
+import io
 
 def readCGNS(filename) :
     # Read CGNS file
@@ -70,6 +72,21 @@ def readCGNS(filename) :
         data['gammaWake'] = gammaWake
 
         return data
+    
+def unsteadyHistory(filename) :
+    # Read CGNS file
+    with h5py.File(filename, 'r') as f:
+
+        data = {}
+
+        data['Time'] = f['Base/GlobalConvergenceHistory/Time/ data'][:]
+        data['Alpha'] = f['Base/GlobalConvergenceHistory/Alpha/ data'][:]
+        data['Cl'] = f['Base/GlobalConvergenceHistory/Cl/ data'][:]
+        data['Cd'] = f['Base/GlobalConvergenceHistory/Cd/ data'][:]
+        data['Cm'] = f['Base/GlobalConvergenceHistory/Cm/ data'][:]
+
+        return data
+
 
 def readHSPM(filename) :
     data = pd.read_csv(filename, sep=' ', skiprows=1, header=None)
@@ -82,9 +99,87 @@ def readHSPM(filename) :
             'Y_wall': y,
             'Cp_wall': cp}
 
-data = readCGNS("../output/output_868.cgns")
-data2 = readCGNS("../output/output_867.cgns")
-data3 = readCGNS("../output/output_879.cgns")
+def make_gif_from_circulation(circulation_list, gif_name, duration=100):
+    """
+    Generate a GIF from a list of circulation (gammaWake) arrays.
+    
+    Parameters:
+    -----------
+    circulation_list : list of arrays
+        List containing gammaWake data from each timestep
+    gif_name : str
+        Output filename for the GIF
+    duration : int
+        Duration of each frame in milliseconds
+    """
+    images = []
+    
+    # Find global min/max for consistent y-axis scaling
+    all_values = np.concatenate([c.flatten() for c in circulation_list])
+    y_min, y_max = np.min(all_values), np.max(all_values)
+    # Add some padding
+    y_range = y_max - y_min
+    y_min -= 0.1 * y_range
+    y_max += 0.1 * y_range
+    
+    for i, gamma in enumerate(circulation_list):
+        fig, ax = plt.subplots(figsize=(10, 6))
+        
+        # Plot circulation distribution
+        ax.plot(gamma.flatten(), 'b-', linewidth=1.5)
+        
+        ax.set_xlabel('Wake Panel Index', fontsize=12)
+        ax.set_ylabel('Circulation (γ)', fontsize=12)
+        ax.set_title(f'Wake Circulation Distribution - Timestep {i+1}', fontsize=14)
+        ax.set_ylim(y_min, y_max)
+        ax.grid(True, alpha=0.3)
+        
+        # Convert plot to image
+        buf = io.BytesIO()
+        fig.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+        buf.seek(0)
+        images.append(Image.open(buf).copy())
+        buf.close()
+        plt.close(fig)
+        
+        # Progress indicator
+        if (i + 1) % 20 == 0:
+            print(f"Processed {i + 1}/{len(circulation_list)} frames")
+    
+    # Save as GIF
+    images[0].save(
+        gif_name,
+        save_all=True,
+        append_images=images[1:],
+        duration=duration,
+        loop=0
+    )
+    print(f"GIF saved as: {gif_name}")
+
+
+
+
+data_unsteady = unsteadyHistory("../output/output_unsteady_test_322.cgns")
+plt.figure()
+plt.plot(data_unsteady['Alpha'], data_unsteady['Cl'], "->",label='Cl')
+
+plt.figure()
+plt.plot(data_unsteady['Time'], data_unsteady['Alpha'], label='Alpha')
+
+# circulation_list = []
+# for i in range(1, 202) :
+#     data = readCGNS(f"../output/output_unsteady_test_{i}.cgns")
+#     circulation_list.append(data['gammaWake'])
+
+# make_gif_from_circulation(
+#             circulation_list, 
+#             "circulation_animation.gif", 
+#             duration=100)
+
+
+data = readCGNS("../output/output_unsteady_test_10.cgns")
+data2 = readCGNS("../output/output_unsteady_test_20.cgns")
+data3 = readCGNS("../output/output_unsteady_test_40.cgns")
 
 data_hspm = readHSPM("../output/HSPM_naca0012_A1-25.dat")
 
