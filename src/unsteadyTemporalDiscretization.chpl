@@ -50,7 +50,7 @@ class unsteadyTemporalDiscretization {
         this.spatialDisc_ = spatialDisc;
         this.inputs_ = inputs;
 
-        const nWakeFace = this.spatialDisc_.wakeFace_.size
+        const nWakeFace = this.spatialDisc_.wakeFace_.size;
         const M = spatialDisc.nelemDomain_*2 + nWakeFace;
         const N = spatialDisc.nelemDomain_*2 + nWakeFace;
         this.gammaIndex_ = spatialDisc.nelemDomain_*2;  // 0-based index for Γ

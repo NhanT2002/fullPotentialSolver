@@ -159,15 +159,15 @@ def make_gif_from_circulation(circulation_list, gif_name, duration=100):
 
 
 
-data_unsteady = unsteadyHistory("../output/output_unsteady_test_4.cgns")
-plt.figure()
-plt.plot(data_unsteady['Alpha'], data_unsteady['Cl'], "->",label='Cl')
+# data_unsteady = unsteadyHistory("../output/output_unsteady_test_82.cgns")
+# plt.figure()
+# plt.plot(data_unsteady['Alpha'], data_unsteady['Cl'], "->",label='Cl')
 
-plt.figure()
-plt.plot(data_unsteady['Time'], data_unsteady['Alpha'], label='Alpha')
+# plt.figure()
+# plt.plot(data_unsteady['Time'], data_unsteady['Alpha'], label='Alpha')
 
 # circulation_list = []
-# for i in range(1, 202) :
+# for i in range(1, 82) :
 #     data = readCGNS(f"../output/output_unsteady_test_{i}.cgns")
 #     circulation_list.append(data['gammaWake'])
 
@@ -177,9 +177,9 @@ plt.plot(data_unsteady['Time'], data_unsteady['Alpha'], label='Alpha')
 #             duration=100)
 
 
-data = readCGNS("../output/output_unsteady_test_1.cgns")
-data2 = readCGNS("../output/output_unsteady_test_2.cgns")
-data3 = readCGNS("../output/output_unsteady_test_3.cgns")
+data = readCGNS("../output/output_unsteady_test_186.cgns")
+data2 = readCGNS("../output/output_unsteady_test_186.cgns")
+data3 = readCGNS("../output/output_unsteady_test_186.cgns")
 
 data_hspm = readHSPM("../output/HSPM_naca0012_A1-25.dat")
 
