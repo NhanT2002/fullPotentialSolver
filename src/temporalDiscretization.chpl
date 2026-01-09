@@ -775,7 +775,9 @@ class temporalDiscretization {
             this.Jij_[elem] = diag;
             
             // Add dRes/dΓ entry (column for circulation)
-            this.A_petsc.add(elem-1, this.gammaIndex_, dRes_dGamma * this.spatialDisc_.res_scale_);
+            if this.inputs_.FREEZE_CIRCULATION_ == false {
+                this.A_petsc.add(elem-1, this.gammaIndex_, dRes_dGamma * this.spatialDisc_.res_scale_);
+            }
         }
 
         // === BETA-BASED UPWIND AUGMENTATION (element-centric for parallelization) ===
@@ -835,14 +837,20 @@ class temporalDiscretization {
         // d(R_Γ)/dφ_upperTE = -1
         // d(R_Γ)/dφ_lowerTE = +1
         
-        // dKutta/dΓ = 1
-        this.A_petsc.add(this.gammaIndex_, this.gammaIndex_, 1.0 * this.spatialDisc_.res_scale_);
-        
-        // dKutta/dφ_upperTE1 = -1.0
-        this.A_petsc.add(this.gammaIndex_, this.spatialDisc_.upperTEelem_ - 1, -1.0 * this.spatialDisc_.res_scale_);
-        // dKutta/dφ_lowerTE1 = +1.0
-        this.A_petsc.add(this.gammaIndex_, this.spatialDisc_.lowerTEelem_ - 1, 1.0 * this.spatialDisc_.res_scale_);
-        
+        if this.inputs_.FREEZE_CIRCULATION_ == false {
+            // dKutta/dΓ = 1
+            this.A_petsc.add(this.gammaIndex_, this.gammaIndex_, 1.0 * this.spatialDisc_.res_scale_);
+            
+            // dKutta/dφ_upperTE1 = -1.0
+            this.A_petsc.add(this.gammaIndex_, this.spatialDisc_.upperTEelem_ - 1, -1.0 * this.spatialDisc_.res_scale_);
+            // dKutta/dφ_lowerTE1 = +1.0
+            this.A_petsc.add(this.gammaIndex_, this.spatialDisc_.lowerTEelem_ - 1, 1.0 * this.spatialDisc_.res_scale_);
+        }
+        else {
+            // If circulation is frozen, set Kutta row to enforce Γ = Γ_old
+            // dKutta/dΓ = 1
+            this.A_petsc.add(this.gammaIndex_, this.gammaIndex_, 1.0 * this.spatialDisc_.res_scale_);
+        }
         this.A_petsc.assemblyComplete();
         // this.A_petsc.matView();
         
@@ -1130,7 +1138,9 @@ class temporalDiscretization {
             forall elem in 1..this.spatialDisc_.nelemDomain_ {
                 this.b_petsc.set(elem-1, -this.spatialDisc_.res_[elem]);
             }
-            this.b_petsc.set(this.gammaIndex_, -this.spatialDisc_.kutta_res_);
+            if this.inputs_.FREEZE_CIRCULATION_ == false {
+                this.b_petsc.set(this.gammaIndex_, -this.spatialDisc_.kutta_res_);
+            }
             this.b_petsc.assemblyComplete();
 
             var its: int;

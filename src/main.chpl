@@ -88,18 +88,18 @@ proc main() {
                 spatialDisc.initializeMetrics();
                 spatialDisc.initializeKuttaCells();
                 spatialDisc.initializeSolution();
-                spatialDisc.run();
-                spatialDisc.writeSolution();
+                // spatialDisc.run();
+                // spatialDisc.writeSolution();
 
-                const res = RMSE(spatialDisc.res_, spatialDisc.elemVolume_);
-                const resPhi = RMSE(spatialDisc.resPhi_, spatialDisc.elemVolume_);
-                const resWake = RMSE(spatialDisc.resWake_);
+                // const res = RMSE(spatialDisc.res_, spatialDisc.elemVolume_);
+                // const resPhi = RMSE(spatialDisc.resPhi_, spatialDisc.elemVolume_);
+                // const resWake = RMSE(spatialDisc.resWake_);
 
-                writeln("Initial Residuals - Total: ", res, ", Phi: ", resPhi, ", Wake: ", resWake);
-                // var unsteadySolver = new shared unsteadyTemporalDiscretization(spatialDisc, inputs);
+                // writeln("Initial Residuals - Total: ", res, ", Phi: ", resPhi, ", Wake: ", resWake);
 
-                // // Use the full unsteady time-stepping loop with oscillating alpha
-                // unsteadySolver.solveUnsteady();
+                var unsteadySolver = new shared unsteadyTemporalDiscretization(spatialDisc, inputs);
+                unsteadySolver.initialize();
+                unsteadySolver.solve();
             }
         }
 

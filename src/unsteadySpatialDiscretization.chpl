@@ -493,18 +493,6 @@ class unsteadySpatialDiscretization {
             const vDotN = uInt * nx + vInt * ny;
             this.uu_[ghostElem] = uInt - 2.0 * vDotN * nx;
             this.vv_[ghostElem] = vInt - 2.0 * vDotN * ny;
-            
-            // For second-order reconstruction: mirror velocity gradients for ghost cells
-            // The tangential gradient is preserved, normal gradient is negated
-            // ∂u/∂n|ghost = -∂u/∂n|interior, ∂u/∂t|ghost = ∂u/∂t|interior
-            // This simplifies to reflecting the gradient across the wall normal
-            const graduuN_int = this.graduuX_[interiorElem] * nx + this.graduuY_[interiorElem] * ny;
-            const gradvvN_int = this.gradvvX_[interiorElem] * nx + this.gradvvY_[interiorElem] * ny;
-            
-            this.graduuX_[ghostElem] = this.graduuX_[interiorElem] - 2.0 * graduuN_int * nx;
-            this.graduuY_[ghostElem] = this.graduuY_[interiorElem] - 2.0 * graduuN_int * ny;
-            this.gradvvX_[ghostElem] = this.gradvvX_[interiorElem] - 2.0 * gradvvN_int * nx;
-            this.gradvvY_[ghostElem] = this.gradvvY_[interiorElem] - 2.0 * gradvvN_int * ny;
         }
 
         inline proc updateFarfieldGhostVelocity(face: int) {
@@ -524,12 +512,6 @@ class unsteadySpatialDiscretization {
             const v_face = this.inputs_.V_INF_;
             this.uu_[ghostElem] = 2*u_face - this.uu_[interiorElem];
             this.vv_[ghostElem] = 2*v_face - this.vv_[interiorElem];
-            
-            // For second-order reconstruction: farfield has uniform velocity, so zero gradient
-            this.graduuX_[ghostElem] = 0.0;
-            this.graduuY_[ghostElem] = 0.0;
-            this.gradvvX_[ghostElem] = 0.0;
-            this.gradvvY_[ghostElem] = 0.0;
         }
         
         forall face in this.mesh_.edgeWall_ do updateWallGhostVelocity(face);
@@ -538,9 +520,6 @@ class unsteadySpatialDiscretization {
 
     proc computeVelocityFromPhiLeastSquaresQR() {
         this.lsGradQR_!.computeGradient(this.phi_, this.uu_, this.vv_, this.kuttaCell_, this.wakeFace2index_, this.wakeFaceGamma_);
-        // Compute velocity gradients for reconstruction
-        this.lsGradQR_!.computeGradient(this.uu_, this.graduuX_, this.graduuY_);
-        this.lsGradQR_!.computeGradient(this.vv_, this.gradvvX_, this.gradvvY_);
     }
 
     proc computeUpwindMu() {
@@ -610,29 +589,9 @@ class unsteadySpatialDiscretization {
         forall face in 1..this.nface_ {
             const elem1 = this.mesh_.edge2elem_[1, face];
             const elem2 = this.mesh_.edge2elem_[2, face];
-
-            // Face centroid
-            const fcx = this.faceCentroidX_[face];
-            const fcy = this.faceCentroidY_[face];
             
-            // Displacement from elem1 centroid to face centroid
-            const dx1 = fcx - this.elemCentroidX_[elem1];
-            const dy1 = fcy - this.elemCentroidY_[elem1];
-            
-            // Displacement from elem2 centroid to face centroid
-            const dx2 = fcx - this.elemCentroidX_[elem2];
-            const dy2 = fcy - this.elemCentroidY_[elem2];
-            
-            // Reconstruct velocities at face from each side (MUSCL-type)
-            const uL = this.uu_[elem1] + this.graduuX_[elem1] * dx1 + this.graduuY_[elem1] * dy1;
-            const vL = this.vv_[elem1] + this.gradvvX_[elem1] * dx1 + this.gradvvY_[elem1] * dy1;
-            
-            const uR = this.uu_[elem2] + this.graduuX_[elem2] * dx2 + this.graduuY_[elem2] * dy2;
-            const vR = this.vv_[elem2] + this.gradvvX_[elem2] * dx2 + this.gradvvY_[elem2] * dy2;
-            
-            // Average the reconstructed values
-            const uAvg = 0.5 * (uL + uR);
-            const vAvg = 0.5 * (vL + vR);
+            const uAvg = 0.5 * (this.uu_[elem1] + this.uu_[elem2]);
+            const vAvg = 0.5 * (this.vv_[elem1] + this.vv_[elem2]);
 
             // Get phi values with potential jump across wake
             var phi1 = this.phi_[elem1];

@@ -816,14 +816,16 @@ class spatialDiscretization {
             this.res_[elem] = res * this.res_scale_;
         }
 
-        // Kutta condition residual: R_Γ = Γ - Γ_computed
-        // We want Γ to equal the computed value from the potential field
-        // R_Γ = Γ_current - (φ_upper - φ_lower) should go to zero
-        // Extrapolated phi at upper and lower TE elem
-        const phi_upper = this.phi_[this.upperTEelem_] + (this.uu_[this.upperTEelem_] * this.deltaSupperTEx_ + this.vv_[this.upperTEelem_] * this.deltaSupperTEy_);
-        const phi_lower = this.phi_[this.lowerTEelem_] + (this.uu_[this.lowerTEelem_] * this.deltaSlowerTEx_ + this.vv_[this.lowerTEelem_] * this.deltaSlowerTEy_);
-        const gamma_computed = phi_upper - phi_lower;
-        this.kutta_res_ = (this.circulation_ - gamma_computed) * this.res_scale_;
+        if this.inputs_.FREEZE_CIRCULATION_ == false {
+            // Kutta condition residual: R_Γ = Γ - Γ_computed
+            // We want Γ to equal the computed value from the potential field
+            // R_Γ = Γ_current - (φ_upper - φ_lower) should go to zero
+            // Extrapolated phi at upper and lower TE elem
+            const phi_upper = this.phi_[this.upperTEelem_] + (this.uu_[this.upperTEelem_] * this.deltaSupperTEx_ + this.vv_[this.upperTEelem_] * this.deltaSupperTEy_);
+            const phi_lower = this.phi_[this.lowerTEelem_] + (this.uu_[this.lowerTEelem_] * this.deltaSlowerTEx_ + this.vv_[this.lowerTEelem_] * this.deltaSlowerTEy_);
+            const gamma_computed = phi_upper - phi_lower;
+            this.kutta_res_ = (this.circulation_ - gamma_computed) * this.res_scale_;
+        }
     }
 
     proc run() {
