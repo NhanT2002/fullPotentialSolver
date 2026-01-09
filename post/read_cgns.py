@@ -177,9 +177,9 @@ def make_gif_from_circulation(circulation_list, gif_name, duration=100):
 #             duration=100)
 
 
-data = readCGNS("../output/output_unsteady_test_186.cgns")
-data2 = readCGNS("../output/output_unsteady_test_186.cgns")
-data3 = readCGNS("../output/output_unsteady_test_186.cgns")
+data = readCGNS("../output/output_34.cgns")
+data2 = readCGNS("../output/output_35.cgns")
+data3 = readCGNS("../output/output_30.cgns")
 
 data_hspm = readHSPM("../output/HSPM_naca0012_A1-25.dat")
 

@@ -86,6 +86,10 @@ config const CFL_UNSTEADY : real(64);
 
 config const q_crit : real(64);
 
+// Cylinder analytical farfield BC
+config const FARFIELD_BC_TYPE : string = "freestream";  // "freestream" or "cylinder"
+config const CYLINDER_RADIUS : real(64) = 0.5;  // Cylinder radius for analytical BC
+
 record potentialInputs {
     var FLOW_ : string = FLOW;
     var GRID_FILENAME_: string = GRID_FILENAME;
@@ -185,6 +189,10 @@ record potentialInputs {
     var q_crit_: real(64) = q_crit;
     var beta_crit_ = MACH_**2*q_crit / (1 + (GAMMA_ - 1)/2*MACH_**2*(1 - q_crit**2));
     var rho_crit_ = (1.0 + (GAMMA_ - 1)/2 * MACH_ * MACH_ * (1.0 - q_crit * q_crit)) ** (1.0 / (GAMMA_ - 1.0));
+
+    // Cylinder analytical farfield BC
+    var FARFIELD_BC_TYPE_: string = FARFIELD_BC_TYPE;
+    var CYLINDER_RADIUS_: real(64) = CYLINDER_RADIUS;
 
     proc init() {
         writeln("Flow type: ", FLOW);

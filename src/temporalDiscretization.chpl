@@ -1079,6 +1079,7 @@ class temporalDiscretization {
         }
         normalized_res = res / this.first_res_;
         const res_wall = RMSE(this.spatialDisc_.res_[this.spatialDisc_.wall_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.wall_dom]);
+        const res_farfield = RMSE(this.spatialDisc_.res_[this.spatialDisc_.farfield_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.farfield_dom]);
         const res_fluid = RMSE(this.spatialDisc_.res_[this.spatialDisc_.fluid_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.fluid_dom]);
         const res_wake = RMSE(this.spatialDisc_.res_[this.spatialDisc_.wake_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.wake_dom]);
         const res_shock = RMSE(this.spatialDisc_.res_[this.spatialDisc_.shock_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.shock_dom]);
@@ -1086,7 +1087,7 @@ class temporalDiscretization {
         const elapsed = this.t0_;
         writeln(" Time: ", elapsed, " It: ", this.it_,
                 " res: ", res, " norm res: ", normalized_res, " kutta res: ", this.spatialDisc_.kutta_res_,
-                " res wall: ", res_wall, " res fluid: ", res_fluid, " res wake: ", res_wake, " res shock: ", res_shock,
+                " res wall: ", res_wall, " res farfield: ", res_farfield, " res fluid: ", res_fluid, " res wake: ", res_wake, " res shock: ", res_shock,
                 " Cl: ", Cl, " Cd: ", Cd, " Cm: ", Cm, " Circulation: ", this.spatialDisc_.circulation_);
         this.timeList_.pushBack(elapsed);
         this.itList_.pushBack(this.it_);
@@ -1311,6 +1312,7 @@ class temporalDiscretization {
             normalized_res = res / this.first_res_;
 
             const res_wall = RMSE(this.spatialDisc_.res_[this.spatialDisc_.wall_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.wall_dom]);
+            const res_farfield = RMSE(this.spatialDisc_.res_[this.spatialDisc_.farfield_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.farfield_dom]);
             const res_fluid = RMSE(this.spatialDisc_.res_[this.spatialDisc_.fluid_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.fluid_dom]);
             const res_wake = RMSE(this.spatialDisc_.res_[this.spatialDisc_.wake_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.wake_dom]);
             const res_shock = RMSE(this.spatialDisc_.res_[this.spatialDisc_.shock_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.shock_dom]);
@@ -1321,14 +1323,14 @@ class temporalDiscretization {
             if this.inputs_.ADAPTIVE_GMRES_TOL_ {
                 writeln(" Time: ", elapsed, " It: ", this.it_,
                         " res: ", res, " norm res: ", normalized_res, " kutta res: ", this.spatialDisc_.kutta_res_,
-                        " res wall: ", res_wall, " res fluid: ", res_fluid, " res wake: ", res_wake, " res shock: ", res_shock,
+                        " res wall: ", res_wall, " res farfield: ", res_farfield, " res fluid: ", res_fluid, " res wake: ", res_wake, " res shock: ", res_shock,
                         " Cl: ", Cl, " Cd: ", Cd, " Cm: ", Cm, " Circulation: ", this.spatialDisc_.circulation_,
                         " GMRES its: ", its, " reason: ", reason, " omega: ", omega, " LS its: ", lineSearchIts,
                         " GMRES rtol: ", current_rtol);
             } else {
                 writeln(" Time: ", elapsed, " It: ", this.it_,
                         " res: ", res, " norm res: ", normalized_res, " kutta res: ", this.spatialDisc_.kutta_res_,
-                        " res wall: ", res_wall, " res fluid: ", res_fluid, " res wake: ", res_wake, " res shock: ", res_shock,
+                        " res wall: ", res_wall, " res farfield: ", res_farfield, " res fluid: ", res_fluid, " res wake: ", res_wake, " res shock: ", res_shock,
                         " Cl: ", Cl, " Cd: ", Cd, " Cm: ", Cm, " Circulation: ", this.spatialDisc_.circulation_,
                         " GMRES its: ", its, " reason: ", reason, " omega: ", omega, " LS its: ", lineSearchIts);
             }
