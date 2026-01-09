@@ -1073,6 +1073,21 @@ class spatialDiscretization {
         fieldsWall["nxWall"] = nxWall;
         fieldsWall["nyWall"] = nyWall;
 
+        if this.inputs_.FARFIELD_BC_TYPE_ == "cylinder" {
+            const (phi_exact, u_exact, v_exact) = this.cylinder_solution(xWall, yWall);
+            var error_u_wall : [wall_dom] real(64);
+            var error_v_wall : [wall_dom] real(64);
+            forall i in wall_dom {
+                error_u_wall[i] = abs(uWall[i] - u_exact[i]);
+                error_v_wall[i] = abs(vWall[i] - v_exact[i]);
+            }
+
+            const rmse_error_u_wall = RMSE(error_u_wall);
+            const rmse_error_v_wall = RMSE(error_v_wall);
+
+            writeln("RMSE Error wall in u: ", rmse_error_u_wall, ", v: ", rmse_error_v_wall);
+        }
+
         writer.writeWallSolution(this.mesh_, wall_dom, fieldsWall);
 
         const wake_dom = {0..<this.wake_face_dom.size};
