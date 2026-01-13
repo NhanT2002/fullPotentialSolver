@@ -50,7 +50,8 @@ class unsteadyTemporalDiscretization {
         this.spatialDisc_ = spatialDisc;
         this.inputs_ = inputs;
 
-        const nWakeFace = this.spatialDisc_.wakeFace_.size;
+        // When FREEZE_CIRCULATION is true, exclude wake variables from the system
+        const nWakeFace = if inputs.FREEZE_CIRCULATION_ then 0 else this.spatialDisc_.wakeFace_.size;
         const M = spatialDisc.nelemDomain_*2 + nWakeFace;
         const N = spatialDisc.nelemDomain_*2 + nWakeFace;
         this.gammaIndex_ = spatialDisc.nelemDomain_*2;  // 0-based index for Γ
@@ -194,12 +195,14 @@ class unsteadyTemporalDiscretization {
                 }
             }
         }
-        // third block: dRes^(rho)/d(Γ)
-        forall (i, face) in zip(this.spatialDisc_.wake_face_dom, this.spatialDisc_.wakeFace_) {
-            const elem1 = this.spatialDisc_.mesh_.edge2elem_[1, face];
-            const elem2 = this.spatialDisc_.mesh_.edge2elem_[2, face];
-            for elem in [elem1, elem2] {
-                this.A_petsc.set(elem-1, 2*this.spatialDisc_.nelemDomain_ + i -1, 0.0);
+        // third block: dRes^(rho)/d(Γ) - only if wake is active
+        if !this.inputs_.FREEZE_CIRCULATION_ {
+            forall (i, face) in zip(this.spatialDisc_.wake_face_dom, this.spatialDisc_.wakeFace_) {
+                const elem1 = this.spatialDisc_.mesh_.edge2elem_[1, face];
+                const elem2 = this.spatialDisc_.mesh_.edge2elem_[2, face];
+                for elem in [elem1, elem2] {
+                    this.A_petsc.set(elem-1, 2*this.spatialDisc_.nelemDomain_ + i -1, 0.0);
+                }
             }
         }
         // fourth block: dRes^(phi)/d(rho)
@@ -219,41 +222,47 @@ class unsteadyTemporalDiscretization {
                 }
             }
         }
-        // sixth block: dRes^(phi)/d(Γ)
-        forall (i, face) in zip(this.spatialDisc_.wake_face_dom, this.spatialDisc_.wakeFace_) {
-            const elem1 = this.spatialDisc_.mesh_.edge2elem_[1, face];
-            const elem2 = this.spatialDisc_.mesh_.edge2elem_[2, face];
+        // sixth block: dRes^(phi)/d(Γ) - only if wake is active
+        if !this.inputs_.FREEZE_CIRCULATION_ {
+            forall (i, face) in zip(this.spatialDisc_.wake_face_dom, this.spatialDisc_.wakeFace_) {
+                const elem1 = this.spatialDisc_.mesh_.edge2elem_[1, face];
+                const elem2 = this.spatialDisc_.mesh_.edge2elem_[2, face];
 
-            for elem in [elem1, elem2] {
-                this.A_petsc.set(this.spatialDisc_.nelemDomain_ + elem-1, 2*this.spatialDisc_.nelemDomain_ + i -1, 0.0);
-            }
-        }
-
-        // seventh block: dRes^(wake)/d(phi)
-        forall (i, face) in zip(this.spatialDisc_.wake_face_dom, this.spatialDisc_.wakeFace_) {
-            const elem1 = this.spatialDisc_.mesh_.edge2elem_[1, face];
-            const elem2 = this.spatialDisc_.mesh_.edge2elem_[2, face];
-            for elem in [elem1, elem2] {
-                this.A_petsc.set(2*this.spatialDisc_.nelemDomain_ + i -1, this.spatialDisc_.nelemDomain_ + elem -1, 0.0);
-
-                const faces = this.spatialDisc_.mesh_.elem2edge_[this.spatialDisc_.mesh_.elem2edgeIndex_[elem] + 1 .. this.spatialDisc_.mesh_.elem2edgeIndex_[elem + 1]];
-                for face in faces {
-                    const elem1 = this.spatialDisc_.mesh_.edge2elem_[1, face];
-                    const elem2 = this.spatialDisc_.mesh_.edge2elem_[2, face];
-                    const neighbor = if elem1 == elem then elem2 else elem1;
-                    if neighbor <= this.spatialDisc_.nelemDomain_ {
-                        this.A_petsc.set(2*this.spatialDisc_.nelemDomain_ + i -1, this.spatialDisc_.nelemDomain_ + neighbor-1, 0.0);
-                    }
+                for elem in [elem1, elem2] {
+                    this.A_petsc.set(this.spatialDisc_.nelemDomain_ + elem-1, 2*this.spatialDisc_.nelemDomain_ + i -1, 0.0);
                 }
-
             }
         }
-        // eighth block: dRes^(wake)/d(Γ)
-        forall (i, face) in zip(this.spatialDisc_.wake_face_dom, this.spatialDisc_.wakeFace_) {
-            const elem1 = this.spatialDisc_.mesh_.edge2elem_[1, face];
-            const elem2 = this.spatialDisc_.mesh_.edge2elem_[2, face];
-            for elem in [elem1, elem2] {
-                this.A_petsc.set(2*this.spatialDisc_.nelemDomain_ + i -1, 2*this.spatialDisc_.nelemDomain_ + i -1, 0.0);
+
+        // seventh block: dRes^(wake)/d(phi) - only if wake is active
+        if !this.inputs_.FREEZE_CIRCULATION_ {
+            forall (i, face) in zip(this.spatialDisc_.wake_face_dom, this.spatialDisc_.wakeFace_) {
+                const elem1 = this.spatialDisc_.mesh_.edge2elem_[1, face];
+                const elem2 = this.spatialDisc_.mesh_.edge2elem_[2, face];
+                for elem in [elem1, elem2] {
+                    this.A_petsc.set(2*this.spatialDisc_.nelemDomain_ + i -1, this.spatialDisc_.nelemDomain_ + elem -1, 0.0);
+
+                    const faces = this.spatialDisc_.mesh_.elem2edge_[this.spatialDisc_.mesh_.elem2edgeIndex_[elem] + 1 .. this.spatialDisc_.mesh_.elem2edgeIndex_[elem + 1]];
+                    for face in faces {
+                        const elem1 = this.spatialDisc_.mesh_.edge2elem_[1, face];
+                        const elem2 = this.spatialDisc_.mesh_.edge2elem_[2, face];
+                        const neighbor = if elem1 == elem then elem2 else elem1;
+                        if neighbor <= this.spatialDisc_.nelemDomain_ {
+                            this.A_petsc.set(2*this.spatialDisc_.nelemDomain_ + i -1, this.spatialDisc_.nelemDomain_ + neighbor-1, 0.0);
+                        }
+                    }
+
+                }
+            }
+        }
+        // eighth block: dRes^(wake)/d(Γ) - only if wake is active
+        if !this.inputs_.FREEZE_CIRCULATION_ {
+            forall (i, face) in zip(this.spatialDisc_.wake_face_dom, this.spatialDisc_.wakeFace_) {
+                const elem1 = this.spatialDisc_.mesh_.edge2elem_[1, face];
+                const elem2 = this.spatialDisc_.mesh_.edge2elem_[2, face];
+                for elem in [elem1, elem2] {
+                    this.A_petsc.set(2*this.spatialDisc_.nelemDomain_ + i -1, 2*this.spatialDisc_.nelemDomain_ + i -1, 0.0);
+                }
             }
         }
 
@@ -266,47 +275,28 @@ class unsteadyTemporalDiscretization {
 
         this.assemble_dResRho_dRho();
         this.assemble_dResRho_dPhi();
-        this.assemble_dResRho_dGamma();
         this.assemble_dResPhi_dRho();
         this.assemble_dResPhi_dPhi();
-        this.assemble_dResPhi_dGamma();
-        this.assemble_dResWake_dPhi();
-        this.assemble_dResWake_dGamma();
+        
+        // Only assemble wake-related Jacobian blocks if not frozen
+        if !this.inputs_.FREEZE_CIRCULATION_ {
+            this.assemble_dResRho_dGamma();
+            this.assemble_dResPhi_dGamma();
+            this.assemble_dResWake_dPhi();
+            this.assemble_dResWake_dGamma();
+        }
         
         this.A_petsc.assemblyComplete();
         // this.A_petsc.matView();
     }
 
     proc assemble_dResRho_dRho() {
+        // With isentropic face density, flux depends only on phi (via face velocity)
+        // The only dependence on cell rho is the temporal term
         forall elem in 1..this.spatialDisc_.nelemDomain_ {
-            // Res = (V/dt) * (rho_elem - rho_elem^n) + sum_faces ( rho_f * (V·n) * area_face )
-            // rho_f = 0.5 * (rho_elem + rho_neighbor)
-            var diag = this.spatialDisc_.elemVolume_[elem] / this.inputs_.TIME_STEP_;
-            const faces = this.spatialDisc_.mesh_.elem2edge_[this.spatialDisc_.mesh_.elem2edgeIndex_[elem] + 1 .. this.spatialDisc_.mesh_.elem2edgeIndex_[elem + 1]];
-            for face in faces {
-                const elem1 = this.spatialDisc_.mesh_.edge2elem_[1, face];
-                const elem2 = this.spatialDisc_.mesh_.edge2elem_[2, face];
-                const neighbor = if elem1 == elem then elem2 else elem1;
-
-                // Sign: +1 if elem is elem1 (flux outward), -1 if elem is elem2
-                const sign = if elem1 == elem then 1.0 else -1.0;
-                
-                // Face geometry
-                const nx = this.spatialDisc_.faceNormalX_[face];
-                const ny = this.spatialDisc_.faceNormalY_[face];
-                const area = this.spatialDisc_.faceArea_[face];
-
-                // Average velocity at face
-                const uFace = this.spatialDisc_.uFace_[face];
-                const vFace = this.spatialDisc_.vFace_[face];
-
-                diag += 0.5 * sign * (uFace * nx + vFace * ny) * area;
-
-                if neighbor <= this.spatialDisc_.nelemDomain_ {
-                    const offDiag = 0.5 * sign * (uFace * nx + vFace * ny) * area;
-                    this.A_petsc.set(elem-1, neighbor-1, offDiag);
-                }
-            }
+            // Res = (V/dt) * (rho_elem - rho_elem^n) + sum_faces ( rho_isen * (V·n) * area )
+            // d(Res)/d(rho_elem) = V/dt  (flux depends on face velocity from phi, not cell rho)
+            const diag = this.spatialDisc_.elemVolume_[elem] / this.inputs_.TIME_STEP_;
             this.A_petsc.set(elem-1, elem-1, diag);
         }
     }
@@ -658,7 +648,8 @@ class unsteadyTemporalDiscretization {
                             wy_elemToNeighbor = this.spatialDisc_.lsGradQR_!.wyFinal2_[face];
                         }
                         const offDiag = sign * (this.spatialDisc_.uu_[elem] * wx_elemToNeighbor + this.spatialDisc_.vv_[elem] * wy_elemToNeighbor);
-                        this.A_petsc.set(2*this.spatialDisc_.nelemDomain_ + i -1, this.spatialDisc_.nelemDomain_ + neighbor-1, offDiag);
+                        // Use add since elem1 and elem2 may share common neighbors
+                        this.A_petsc.add(2*this.spatialDisc_.nelemDomain_ + i -1, this.spatialDisc_.nelemDomain_ + neighbor-1, offDiag);
                     }
                 }
 
@@ -671,12 +662,14 @@ class unsteadyTemporalDiscretization {
         forall (i, face) in zip(this.spatialDisc_.wake_face_dom, this.spatialDisc_.wakeFace_) {
             const elem1 = this.spatialDisc_.mesh_.edge2elem_[1, face];
             const elem2 = this.spatialDisc_.mesh_.edge2elem_[2, face];
+            
+            // Accumulate diagonal contribution from both adjacent elements
+            var diag = 1.0 / this.inputs_.TIME_STEP_;
             for elem in [elem1, elem2] {
-                var diag = 1.0 / this.inputs_.TIME_STEP_;
                 const sign = if this.spatialDisc_.kuttaCell_[elem] == 1 then 1.0 else -1.0;
                 diag += sign * (this.spatialDisc_.uu_[elem] * this.dgradX_dGamma_[elem] + this.spatialDisc_.vv_[elem] * this.dgradY_dGamma_[elem]);
-                this.A_petsc.set(2*this.spatialDisc_.nelemDomain_ + i -1, 2*this.spatialDisc_.nelemDomain_ + i -1, diag);
             }
+            this.A_petsc.set(2*this.spatialDisc_.nelemDomain_ + i -1, 2*this.spatialDisc_.nelemDomain_ + i -1, diag);
         }
     }
 
@@ -800,20 +793,27 @@ class unsteadyTemporalDiscretization {
             forall elem in 1..this.spatialDisc_.nelemDomain_ {
                 this.b_petsc.set(this.spatialDisc_.nelemDomain_ + elem-1, -this.spatialDisc_.resPhi_[elem]);
             }
-            forall (i, face) in zip(this.spatialDisc_.wake_face_dom, this.spatialDisc_.wakeFace_) {
-                this.b_petsc.set(2*this.spatialDisc_.nelemDomain_ + i -1, -this.spatialDisc_.resWake_[i]);
+            // Only set wake RHS if not frozen
+            if !this.inputs_.FREEZE_CIRCULATION_ {
+                forall (i, face) in zip(this.spatialDisc_.wake_face_dom, this.spatialDisc_.wakeFace_) {
+                    this.b_petsc.set(2*this.spatialDisc_.nelemDomain_ + i -1, -this.spatialDisc_.resWake_[i]);
+                }
             }
             this.b_petsc.assemblyComplete();
 
             // === PETSC GMRES ===
             const (its, reason) = GMRES(this.ksp, this.A_petsc, this.b_petsc, this.x_petsc);
 
+            // Apply solution update: x = [rho_1..rho_N, phi_1..phi_N, Γ_1..Γ_M]
             forall elem in 1..this.spatialDisc_.nelemDomain_ {
-                this.spatialDisc_.phi_[elem] += omega * this.x_petsc.get(elem-1);
-                this.spatialDisc_.rhorho_[elem] += omega * this.x_petsc.get(this.spatialDisc_.nelemDomain_ + elem-1);
+                this.spatialDisc_.rhorho_[elem] += omega * this.x_petsc.get(elem-1);  // rho block
+                this.spatialDisc_.phi_[elem] += omega * this.x_petsc.get(this.spatialDisc_.nelemDomain_ + elem-1);  // phi block
             }
-            forall (i, face) in zip(this.spatialDisc_.wake_face_dom, this.spatialDisc_.wakeFace_) {
-                this.spatialDisc_.wakeFaceGamma_[i] += omega * this.x_petsc.get(2*this.spatialDisc_.nelemDomain_ + i -1);
+            // Only update wake if not frozen
+            if !this.inputs_.FREEZE_CIRCULATION_ {
+                forall (i, face) in zip(this.spatialDisc_.wake_face_dom, this.spatialDisc_.wakeFace_) {
+                    this.spatialDisc_.wakeFaceGamma_[i] += omega * this.x_petsc.get(2*this.spatialDisc_.nelemDomain_ + i -1);
+                }
             }
             
             // Compute residual for convergence check

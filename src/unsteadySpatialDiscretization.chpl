@@ -636,14 +636,20 @@ class unsteadySpatialDiscretization {
             const uFace = uAvg - delta * this.corrCoeffX_[face];
             const vFace = vAvg - delta * this.corrCoeffY_[face];
             
-            // Isentropic density from Bernoulli equation
-            const rhoFace = 0.5*(this.rhorho_[elem1] + this.rhorho_[elem2]);
+            // Unsteady isentropic face density from Bernoulli equation
+            // The unsteady Bernoulli: φ_t + |∇φ|²/2 + H(ρ) = H_∞
+            // Solving for ρ: ρ = (1 + (γ-1)/2 * M²∞ * (1 - u² - v² - 2*φ_t))^(1/(γ-1))
+            // Approximate φ_t at face as average of cell values
+            const phi_t_face = 0.5 * ((this.phi_[elem1] - this.phi_m1_[elem1]) + 
+                                      (this.phi_[elem2] - this.phi_m1_[elem2])) / this.inputs_.TIME_STEP_;
+            const rhoFace = (1.0 + this.gamma_minus_one_over_two_ * this.inputs_.MACH_ * this.inputs_.MACH_ * 
+                             (1.0 - uFace * uFace - vFace * vFace - 2.0 * phi_t_face)) ** this.one_over_gamma_minus_one_;
 
             // Store face quantities
             this.uFace_[face] = uFace;
             this.vFace_[face] = vFace;
             this.rhoFace_[face] = rhoFace;
-            this.rhoIsenFace_[face] = rhoFace; // Store isentropic density for later use
+            this.rhoIsenFace_[face] = rhoFace;  // Same as rhoFace for unsteady isentropic
         }
     }
 
