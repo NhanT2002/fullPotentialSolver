@@ -48,6 +48,8 @@ class unsteadySpatialDiscretization {
 
     var phi_m1_: [elem_dom] real(64); // phi at previous time step
     var rhorho_m1_: [elem_dom] real(64); // rho at previous time step
+    var phi_m2_: [elem_dom] real(64); // phi at two time steps ago
+    var rhorho_m2_: [elem_dom] real(64); // rho at two time steps ago
 
 
     
@@ -439,6 +441,8 @@ class unsteadySpatialDiscretization {
         forall elem in 1..this.nelem_ {
             this.phi_m1_[elem] = this.phi_[elem];
             this.rhorho_m1_[elem] = this.rhorho_[elem];
+            this.phi_m2_[elem] = this.phi_[elem];
+            this.rhorho_m2_[elem] = this.rhorho_[elem];
         }
 
         // Initialize lagrangian vortices
@@ -675,8 +679,9 @@ class unsteadySpatialDiscretization {
             // The unsteady Bernoulli: φ_t + |∇φ|²/2 + H(ρ) = H_∞
             // Solving for ρ: ρ = (1 + (γ-1)/2 * M²∞ * (1 - u² - v² - 2*φ_t))^(1/(γ-1))
             // Approximate φ_t at face as average of cell values
-            const phi_t_face = 0.5 * ((this.phi_[elem1] - this.phi_m1_[elem1]) + 
-                                      (this.phi_[elem2] - this.phi_m1_[elem2])) / this.inputs_.TIME_STEP_;
+            const phi_t_elem1 = (3.0*this.phi_[elem1] - 4.0*this.phi_m1_[elem1] + this.phi_m2_[elem1]) / (2.0*this.inputs_.TIME_STEP_);
+            const phi_t_elem2 = (3.0*this.phi_[elem2] - 4.0*this.phi_m1_[elem2] + this.phi_m2_[elem2]) / (2.0*this.inputs_.TIME_STEP_);
+            const phi_t_face = 0.5 * (phi_t_elem1 + phi_t_elem2);
             const rhoFace = (1.0 + this.gamma_minus_one_over_two_ * this.inputs_.MACH_ * this.inputs_.MACH_ * 
                              (1.0 - uFace * uFace - vFace * vFace - 2.0 * phi_t_face)) ** this.one_over_gamma_minus_one_;
 
@@ -766,10 +771,10 @@ class unsteadySpatialDiscretization {
 
                 res += sign * this.flux_[face];
             }
-            this.res_[elem] = this.elemVolume_[elem] * (this.rhorho_[elem] - this.rhorho_m1_[elem]) / this.inputs_.TIME_STEP_  
+            this.res_[elem] = this.elemVolume_[elem] * (3.0*this.rhorho_[elem] - 4.0*this.rhorho_m1_[elem] + this.rhorho_m2_[elem]) / (2.0*this.inputs_.TIME_STEP_)  
                                 + res;
 
-            this.resPhi_[elem] = this.elemVolume_[elem] * ((this.phi_[elem] - this.phi_m1_[elem]) / this.inputs_.TIME_STEP_ 
+            this.resPhi_[elem] = this.elemVolume_[elem] * ((3.0*this.phi_[elem] - 4.0*this.phi_m1_[elem] + this.phi_m2_[elem]) / (2.0*this.inputs_.TIME_STEP_) 
                                 + 0.5*(this.uu_[elem]**2 + this.vv_[elem]**2 - 1) + 
                                 (this.rhorho_[elem]**(this.inputs_.GAMMA_-1) - 1) / ((this.inputs_.GAMMA_-1)*this.inputs_.MACH_**2));
         }
@@ -783,6 +788,7 @@ class unsteadySpatialDiscretization {
         forall i in this.wake_face_dom {
             this.wakeFaceGamma_[i] = interpWake[i];
         }
+        writeln("vortexGamma_: ", this.vortexGamma_);
         writeln("wakeFaceGamma_: ", this.wakeFaceGamma_);
     }
 
@@ -1332,259 +1338,6 @@ class unsteadySpatialDiscretization {
         fieldsWake["gammaWake"] = gammaWake;
 
         writer.writeWakeToCGNS(this.wakeFaceX_, this.wakeFaceY_, this.wakeFaceZ_, wake_dom, fieldsWake);
-    }
-
-    /*
-     * Lagrangian Vortex Shedding Methods
-     * 
-     * These methods implement a Lagrangian approach to vortex shedding:
-     * 1. shedVortex: Creates a new vortex at the trailing edge based on Kutta condition
-     * 2. convectVortices: Moves all vortices downstream at freestream velocity
-     * 3. interpolateToWake: Maps Lagrangian vortex strengths to Eulerian wake faces
-     */
-
-    /*
-     * Shed a new vortex from the trailing edge
-     * 
-     * The shed vortex strength is ΔΓ = Γ_Kutta - Γ_total
-     * where Γ_Kutta is from the Kutta condition and Γ_total is accumulated circulation
-     */
-    proc shedVortex() {
-        // Compute Kutta condition circulation from potential jump at TE
-        const phi_upper_TE = this.phi_[this.upperTEelem_] 
-                           + this.uu_[this.upperTEelem_] * this.deltaSupperTEx_
-                           + this.vv_[this.upperTEelem_] * this.deltaSupperTEy_;
-        const phi_lower_TE = this.phi_[this.lowerTEelem_]
-                           + this.uu_[this.lowerTEelem_] * this.deltaSlowerTEx_
-                           + this.vv_[this.lowerTEelem_] * this.deltaSlowerTEy_;
-        const gamma_kutta = phi_upper_TE - phi_lower_TE;
-        
-        // Debug output
-        writeln("  [shedVortex] phi_upper=", phi_upper_TE, " phi_lower=", phi_lower_TE, 
-                " gamma_kutta=", gamma_kutta, " totalShedGamma=", this.totalShedGamma_);
-        
-        // Vortex strength to shed: difference from what's already in wake
-        const deltaGamma = gamma_kutta - this.totalShedGamma_;
-        
-        // Only shed if significant circulation change
-        if abs(deltaGamma) > 1e-12 {
-            // Grow the vortex arrays if needed
-            this.nVortices_ += 1;
-            if this.nVortices_ > this.lagrangianVortex_dom.size {
-                // Expand domain (with some extra capacity)
-                const newSize = max(this.nVortices_, this.lagrangianVortex_dom.size * 2, 100);
-                this.lagrangianVortex_dom = {1..newSize};
-            }
-            
-            // New vortex at trailing edge position
-            this.vortexX_[this.nVortices_] = this.TEnodeXcoord_;
-            this.vortexGamma_[this.nVortices_] = deltaGamma;
-            
-            // Update total shed circulation
-            this.totalShedGamma_ = gamma_kutta;
-        }
-        
-        // Update scalar circulation (for compatibility)
-        this.circulation_ = gamma_kutta;
-        
-        // Debug: print all vortex positions and strengths
-        writeln("  [Lagrangian Wake] nVortices=", this.nVortices_);
-        for i in 1..this.nVortices_ {
-            writeln("    vortex ", i, ": x=", this.vortexX_[i], " gamma=", this.vortexGamma_[i]);
-        }
-    }
-
-    /*
-     * Convect all Lagrangian vortices downstream at freestream velocity
-     * 
-     * Simple 1D convection: x_new = x_old + U_inf * dt
-     * Vortices convect along the wake line (horizontal for symmetric airfoil)
-     */
-    proc convectVortices() {
-        const U_conv = this.inputs_.WAKE_CONVECTION_VELOCITY_;
-        const dt = this.inputs_.TIME_STEP_;
-        
-        forall i in 1..this.nVortices_ {
-            this.vortexX_[i] += U_conv * dt;
-        }
-    }
-
-    /*
-     * Interpolate Lagrangian vortex circulation onto Eulerian wake faces
-     * 
-     * For each wake face at position x, the circulation is the sum of all 
-     * Lagrangian vortices that have convected past that point (vortex_x >= face_x).
-     * 
-     * The first wake face (at TE) is handled separately by updateKuttaGamma()
-     * during Newton iterations. Here we only update faces 2..n.
-     * 
-     * Uses 1D linear interpolation from Lagrangian vortex positions/strengths
-     * to Eulerian wake face positions.
-     */
-    proc interpolateToWake() {
-        // Skip if no vortices yet
-        if this.nVortices_ == 0 {
-            return;
-        }
-        
-        // For each wake face (except first), interpolate gamma from Lagrangian vortices
-        for wakeIdx in this.wake_face_dom {
-            if wakeIdx == 1 {
-                // First wake face is updated by updateKuttaGamma() during Newton
-                continue;
-            }
-            
-            // Get x-position of this wake face
-            const faceId = this.wakeFace_[wakeIdx];
-            const xFace = this.faceCentroidX_[faceId];
-            
-            // Find bracketing vortices for interpolation
-            // Vortices are stored in order of shedding (oldest first after convection)
-            // We need to find vortices i and i+1 such that vortexX[i] <= xFace < vortexX[i+1]
-            
-            var gamma_interp = 0.0;
-            var found = false;
-            
-            // Check if xFace is before all vortices (upstream of wake)
-            var minVortexX = this.vortexX_[1];
-            var maxVortexX = this.vortexX_[1];
-            for i in 1..this.nVortices_ {
-                if this.vortexX_[i] < minVortexX then minVortexX = this.vortexX_[i];
-                if this.vortexX_[i] > maxVortexX then maxVortexX = this.vortexX_[i];
-            }
-            
-            if xFace <= minVortexX {
-                // Wake face is upstream of all vortices - use gamma from nearest (newest) vortex
-                // Find vortex closest to TE (smallest x)
-                var nearestIdx = 1;
-                for i in 2..this.nVortices_ {
-                    if this.vortexX_[i] < this.vortexX_[nearestIdx] {
-                        nearestIdx = i;
-                    }
-                }
-                gamma_interp = this.vortexGamma_[nearestIdx];
-                found = true;
-            } else if xFace >= maxVortexX {
-                // Wake face is downstream of all vortices - use gamma from farthest vortex
-                var farthestIdx = 1;
-                for i in 2..this.nVortices_ {
-                    if this.vortexX_[i] > this.vortexX_[farthestIdx] {
-                        farthestIdx = i;
-                    }
-                }
-                gamma_interp = this.vortexGamma_[farthestIdx];
-                found = true;
-            } else {
-                // Find two vortices bracketing xFace and interpolate
-                // Sort vortices by x position to find neighbors
-                var leftIdx = -1;
-                var rightIdx = -1;
-                var leftX = -1e30;
-                var rightX = 1e30;
-                
-                for i in 1..this.nVortices_ {
-                    const vx = this.vortexX_[i];
-                    if vx <= xFace && vx > leftX {
-                        leftX = vx;
-                        leftIdx = i;
-                    }
-                    if vx > xFace && vx < rightX {
-                        rightX = vx;
-                        rightIdx = i;
-                    }
-                }
-                
-                if leftIdx > 0 && rightIdx > 0 {
-                    // Linear interpolation between left and right vortices
-                    const t = (xFace - leftX) / (rightX - leftX);
-                    gamma_interp = (1.0 - t) * this.vortexGamma_[leftIdx] + t * this.vortexGamma_[rightIdx];
-                    found = true;
-                } else if leftIdx > 0 {
-                    gamma_interp = this.vortexGamma_[leftIdx];
-                    found = true;
-                } else if rightIdx > 0 {
-                    gamma_interp = this.vortexGamma_[rightIdx];
-                    found = true;
-                }
-            }
-            
-            if found {
-                this.wakeFaceGamma_[wakeIdx] = gamma_interp;
-            }
-        }
-    }
-
-    /*
-     * Update the first wake face (at TE) with current Kutta condition gamma.
-     * Called during each Newton iteration to allow circulation to converge.
-     * 
-     * The first wake face gamma is interpolated between:
-     * - gamma_kutta at the TE position (x = TEnodeXcoord_)
-     * - the nearest downstream Lagrangian vortex
-     */
-    proc updateKuttaGamma() {
-        // Compute Kutta condition circulation from potential jump at TE
-        const phi_upper_TE = this.phi_[this.upperTEelem_] 
-                           + this.uu_[this.upperTEelem_] * this.deltaSupperTEx_
-                           + this.vv_[this.upperTEelem_] * this.deltaSupperTEy_;
-        const phi_lower_TE = this.phi_[this.lowerTEelem_]
-                           + this.uu_[this.lowerTEelem_] * this.deltaSlowerTEx_
-                           + this.vv_[this.lowerTEelem_] * this.deltaSlowerTEy_;
-        const gamma_kutta = phi_upper_TE - phi_lower_TE;
-        
-        // Get position of first wake face
-        const faceId = this.wakeFace_[1];
-        const xFace = this.faceCentroidX_[faceId];
-        const xTE = this.TEnodeXcoord_;
-        
-        // Find nearest downstream vortex (smallest x > xTE)
-        var nearestVortexX = 1e30;
-        var nearestVortexGamma = gamma_kutta;  // default if no vortices
-        
-        for i in 1..this.nVortices_ {
-            if this.vortexX_[i] > xTE && this.vortexX_[i] < nearestVortexX {
-                nearestVortexX = this.vortexX_[i];
-                nearestVortexGamma = this.vortexGamma_[i];
-            }
-        }
-        
-        // Interpolate between gamma_kutta at TE and nearest vortex
-        var gamma_interp: real(64);
-        if this.nVortices_ == 0 || nearestVortexX > 1e29 {
-            // No vortices yet, use gamma_kutta directly
-            gamma_interp = gamma_kutta;
-        } else if xFace <= xTE {
-            // Wake face is at or before TE
-            gamma_interp = gamma_kutta;
-        } else if xFace >= nearestVortexX {
-            // Wake face is at or past the nearest vortex
-            gamma_interp = nearestVortexGamma;
-        } else {
-            // Interpolate between TE (gamma_kutta) and nearest vortex
-            const t = (xFace - xTE) / (nearestVortexX - xTE);
-            gamma_interp = (1.0 - t) * gamma_kutta + t * nearestVortexGamma;
-        }
-        
-        this.wakeFaceGamma_[1] = gamma_interp;
-        this.circulation_ = gamma_kutta;
-    }
-
-    /*
-     * Remove vortices that have exited the computational domain
-     * (optional cleanup to prevent unbounded growth)
-     */
-    proc pruneVortices(xMax: real(64)) {
-        var writeIdx = 0;
-        for readIdx in 1..this.nVortices_ {
-            if this.vortexX_[readIdx] <= xMax {
-                writeIdx += 1;
-                if writeIdx != readIdx {
-                    this.vortexX_[writeIdx] = this.vortexX_[readIdx];
-                    this.vortexGamma_[writeIdx] = this.vortexGamma_[readIdx];
-                }
-            }
-        }
-        this.nVortices_ = writeIdx;
     }
 }
 

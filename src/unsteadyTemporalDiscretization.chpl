@@ -238,7 +238,7 @@ class unsteadyTemporalDiscretization {
         forall elem in 1..this.spatialDisc_.nelemDomain_ {
             // Res = (V/dt) * (rho_elem - rho_elem^n) + sum_faces ( rho_isen * (V·n) * area )
             // d(Res)/d(rho_elem) = V/dt  (flux depends on face velocity from phi, not cell rho)
-            const diag = this.spatialDisc_.elemVolume_[elem] / this.inputs_.TIME_STEP_;
+            const diag = 1.5 * this.spatialDisc_.elemVolume_[elem] / this.inputs_.TIME_STEP_;
             this.A_petsc.set(elem-1, elem-1, diag);
         }
     }
@@ -511,7 +511,7 @@ class unsteadyTemporalDiscretization {
     proc assemble_dResPhi_dPhi() {
         // Res = V * [(φ^n - φ^{n-1}) / dt + 0.5*(u^2 + v^2 - 1) + (rho^{gamma-1} - 1)/((gamma -1) * M_inf^2)]
         forall elem in 1..this.spatialDisc_.nelemDomain_ {
-            var diag = 1.0 / this.inputs_.TIME_STEP_;
+            var diag = 1.5 / this.inputs_.TIME_STEP_;
 
             const sumWx_elem = this.spatialDisc_.lsGradQR_!.sumWx_[elem];
             const sumWy_elem = this.spatialDisc_.lsGradQR_!.sumWy_[elem];
@@ -816,13 +816,20 @@ class unsteadyTemporalDiscretization {
 
             // Advance physical time
             forall elem in 1..this.spatialDisc_.nelemDomain_ {
+                this.spatialDisc_.phi_m2_[elem] = this.spatialDisc_.phi_m1_[elem];
+                this.spatialDisc_.rhorho_m2_[elem] = this.spatialDisc_.rhorho_m1_[elem];
+            }
+            forall elem in 1..this.spatialDisc_.nelemDomain_ {
                 this.spatialDisc_.phi_m1_[elem] = this.spatialDisc_.phi_[elem];
                 this.spatialDisc_.rhorho_m1_[elem] = this.spatialDisc_.rhorho_[elem];
             }
             // Convect vortices in Lagrangian wake
-            for i in 1..this.spatialDisc_.nVortices_ by -1 {
+            // Shift from position 2 onwards (vortexGamma_[1] is set by Kutta condition each iteration)
+            for i in 2..this.spatialDisc_.nVortices_ by -1 {
                 this.spatialDisc_.vortexGamma_[i] = this.spatialDisc_.vortexGamma_[i-1];
             }
+            // vortexGamma_[1] retains the converged circulation from this time step
+            // It will be updated by the Kutta condition in the next time step's Newton iterations
 
             physicalTime += dt;
             this.timeStep_ += 1;
@@ -833,216 +840,6 @@ class unsteadyTemporalDiscretization {
 
     }
 
-    /*
-     * Time-accurate unsteady solver for oscillating airfoil
-     *
-     * Outer loop: Physical time steps (advance from t=0 to t=TIME_FINAL)
-     * Inner loop: Newton iterations to converge each time step
-     *
-     * The angle of attack oscillates as:
-     *   α(t) = α_0 + α_amp * sin(2π * k * t + φ)
-     * where k is the reduced frequency
-     */
-    proc solveUnsteady() {
-        const dt = this.inputs_.TIME_STEP_;
-        const t_final = this.inputs_.TIME_FINAL_;
-        const alpha_0 = this.inputs_.ALPHA_0_;      // Mean angle [degrees]
-        const alpha_amp = this.inputs_.ALPHA_AMPLITUDE_;  // Amplitude [degrees]
-        const k = this.inputs_.ALPHA_FREQUENCY_;    // Reduced frequency
-        const phi = this.inputs_.ALPHA_PHASE_;      // Phase [radians]
-        const pi = 3.14159265358979323846;
-        
-        // Inner Newton iteration parameters
-        const newton_tol = this.inputs_.CONV_TOL_;
-        const newton_max_it = this.inputs_.IT_MAX_;
-        var omega = this.inputs_.OMEGA_;
-        
-        var time_watch: stopwatch;
-        time_watch.start();
-        
-        writeln("=== Starting time-accurate unsteady simulation ===");
-        writeln("  Time step dt = ", dt);
-        writeln("  Final time = ", t_final);
-        writeln("  Alpha_0 = ", alpha_0, " deg, Amplitude = ", alpha_amp, " deg");
-        writeln("  Reduced frequency k = ", k);
-        
-        // Initialize at t=0
-        this.physicalTime_ = 0.0;
-        this.timeStep_ = 0;
-        
-        // Compute initial alpha
-        var alpha_current = alpha_0 + alpha_amp * sin(2.0*pi*k*this.physicalTime_ + phi);
-        this.updateAlpha(alpha_current);
-        
-        // Initial residual computation
-        this.spatialDisc_.run();
-        var res = RMSE(this.spatialDisc_.res_, this.spatialDisc_.elemVolume_);
-        this.first_res_ = res;
-        
-        // Store initial state
-        const (Cl_init, Cd_init, Cm_init) = this.spatialDisc_.computeAerodynamicCoefficients();
-        this.timeList_.pushBack(this.physicalTime_);
-        this.alphaList_.pushBack(alpha_current);
-        this.clList_.pushBack(Cl_init);
-        this.cdList_.pushBack(Cd_init);
-        this.cmList_.pushBack(Cm_init);
-        this.circulationList_.pushBack(this.spatialDisc_.circulation_);
-        this.resList_.pushBack(res);
-        this.itList_.pushBack(0);
-        
-        // Debug: print gamma_kutta at t=0
-        {
-            const phi_upper_TE = this.spatialDisc_.phi_[this.spatialDisc_.upperTEelem_] 
-                               + this.spatialDisc_.uu_[this.spatialDisc_.upperTEelem_] * this.spatialDisc_.deltaSupperTEx_
-                               + this.spatialDisc_.vv_[this.spatialDisc_.upperTEelem_] * this.spatialDisc_.deltaSupperTEy_;
-            const phi_lower_TE = this.spatialDisc_.phi_[this.spatialDisc_.lowerTEelem_]
-                               + this.spatialDisc_.uu_[this.spatialDisc_.lowerTEelem_] * this.spatialDisc_.deltaSlowerTEx_
-                               + this.spatialDisc_.vv_[this.spatialDisc_.lowerTEelem_] * this.spatialDisc_.deltaSlowerTEy_;
-            const gamma_kutta_init = phi_upper_TE - phi_lower_TE;
-            writeln("  [t=0 debug] phi_upper=", phi_upper_TE, " phi_lower=", phi_lower_TE, 
-                    " gamma_kutta=", gamma_kutta_init);
-        }
-        
-        writeln(" t=", this.physicalTime_, " alpha=", alpha_current, " Cl=", Cl_init, " Cd=", Cd_init, " Gamma=", this.spatialDisc_.circulation_);
-        
-        // Time stepping loop
-        while this.physicalTime_ < t_final {
-            this.timeStep_ += 1;
-            this.physicalTime_ += dt;
-            
-            // Update angle of attack for this time step
-            alpha_current = alpha_0 + alpha_amp * sin(2.0*pi*k*this.physicalTime_ + phi);
-            this.updateAlpha(alpha_current);
-            
-            // Lagrangian wake: convect vortices from previous time step
-            // then interpolate to wake faces (except first which will be updated during Newton)
-            if this.inputs_.LAGRANGIAN_WAKE_ {
-                this.spatialDisc_.convectVortices();
-                this.spatialDisc_.interpolateToWake();
-                // Initialize first wake face with current Kutta gamma
-                this.spatialDisc_.updateKuttaGamma();
-            }
-            
-            // Newton iteration to converge this time step
-            this.spatialDisc_.run();
-            res = RMSE(this.spatialDisc_.res_, this.spatialDisc_.elemVolume_);
-            // Use residual at start of this time step for normalization
-            const first_res_timestep = max(res, 1e-12);
-            var normalized_res = 1.0;  // Start at 1
-            var newton_it = 0;
-            
-            // Converge until relative residual < tolerance OR absolute residual is very small
-            const abs_tol = 1e-10;
-            while (normalized_res > newton_tol && res > abs_tol && newton_it < newton_max_it) {
-                newton_it += 1;
-                this.it_ += 1;
-                
-                // Compute Jacobian and solve Newton system
-                this.computeJacobian();
-                
-                // Set RHS
-                forall elem in 1..this.spatialDisc_.nelemDomain_ {
-                    this.b_petsc.set(elem-1, -this.spatialDisc_.res_[elem]);
-                }
-                forall elem in 1..this.spatialDisc_.nelemDomain_ {
-                    this.b_petsc.set(this.spatialDisc_.nelemDomain_ + elem-1, -this.spatialDisc_.resPhi_[elem]);
-                }
-                // Wake RHS only if not using Lagrangian or frozen circulation
-                if !this.inputs_.FREEZE_CIRCULATION_ && !this.inputs_.LAGRANGIAN_WAKE_ {
-                    forall (i, face) in zip(this.spatialDisc_.wake_face_dom, this.spatialDisc_.wakeFace_) {
-                        this.b_petsc.set(2*this.spatialDisc_.nelemDomain_ + i -1, -this.spatialDisc_.resWake_[i]);
-                    }
-                }
-                this.b_petsc.assemblyComplete();
-                
-                // Solve linear system
-                const (its, reason) = GMRES(this.ksp, this.A_petsc, this.b_petsc, this.x_petsc);
-                
-                // Apply solution update
-                forall elem in 1..this.spatialDisc_.nelemDomain_ {
-                    this.spatialDisc_.rhorho_[elem] += omega * this.x_petsc.get(elem-1);
-                    this.spatialDisc_.phi_[elem] += omega * this.x_petsc.get(this.spatialDisc_.nelemDomain_ + elem-1);
-                }
-                // Wake update only if not using Lagrangian or frozen circulation
-                if !this.inputs_.FREEZE_CIRCULATION_ && !this.inputs_.LAGRANGIAN_WAKE_ {
-                    forall (i, face) in zip(this.spatialDisc_.wake_face_dom, this.spatialDisc_.wakeFace_) {
-                        this.spatialDisc_.wakeFaceGamma_[i] += omega * this.x_petsc.get(2*this.spatialDisc_.nelemDomain_ + i -1);
-                    }
-                    this.spatialDisc_.circulation_ = this.spatialDisc_.wakeFaceGamma_[1];
-                }
-                
-                // Lagrangian wake: update first wake face with current Kutta gamma
-                if this.inputs_.LAGRANGIAN_WAKE_ {
-                    this.spatialDisc_.updateKuttaGamma();
-                }
-                
-                // Compute new residual
-                this.spatialDisc_.run();
-                res = RMSE(this.spatialDisc_.res_, this.spatialDisc_.elemVolume_);
-                normalized_res = res / first_res_timestep;
-            }
-            
-            // After Newton convergence: update Lagrangian wake (once per time step)
-            if this.inputs_.LAGRANGIAN_WAKE_ {
-                this.spatialDisc_.shedVortex();
-                this.spatialDisc_.interpolateToWake();
-            }
-            
-            // Update previous time level for next time step's time derivative
-            forall elem in 1..this.spatialDisc_.nelemDomain_ {
-                this.spatialDisc_.phi_m1_[elem] = this.spatialDisc_.phi_[elem];
-                this.spatialDisc_.rhorho_m1_[elem] = this.spatialDisc_.rhorho_[elem];
-            }
-            this.spatialDisc_.wakeFaceGamma_m1_ = this.spatialDisc_.wakeFaceGamma_;
-            
-            // Time step converged - store results
-            const (Cl, Cd, Cm) = this.spatialDisc_.computeAerodynamicCoefficients();
-            
-            this.timeList_.pushBack(this.physicalTime_);
-            this.alphaList_.pushBack(alpha_current);
-            this.clList_.pushBack(Cl);
-            this.cdList_.pushBack(Cd);
-            this.cmList_.pushBack(Cm);
-            this.circulationList_.pushBack(this.spatialDisc_.circulation_);
-            this.resList_.pushBack(res);
-            this.itList_.pushBack(newton_it);
-            
-            time_watch.stop();
-            writeln(" t=", this.physicalTime_, " alpha=", alpha_current, 
-                    " Cl=", Cl, " Cd=", Cd, " Gamma=", this.spatialDisc_.circulation_,
-                    " Newton its=", newton_it, " res=", normalized_res,
-                    " wall time=", time_watch.elapsed());
-            time_watch.start();
-            
-            // Write output for every time step (includes wake gammas)
-            this.spatialDisc_.writeSolutionUnsteady(this.timeList_, this.alphaList_, this.clList_, this.cdList_, this.cmList_, this.circulationList_);
-        }
-        
-        // Final output
-        this.spatialDisc_.writeSolutionUnsteady(this.timeList_, this.alphaList_, this.clList_, this.cdList_, this.cmList_, this.circulationList_);
-        
-        writeln("=== Unsteady simulation complete ===");
-        writeln("  Total time steps: ", this.timeStep_);
-        writeln("  Total Newton iterations: ", this.it_);
-    }
-
-    /*
-     * Update angle of attack and recompute freestream conditions
-     */
-    proc updateAlpha(alpha_deg: real(64)) {
-        const pi = 3.14159265358979323846;
-        const alpha_rad = alpha_deg * pi / 180.0;
-        
-        // Update freestream velocity components
-        this.spatialDisc_.inputs_.ALPHA_ = alpha_deg;
-        this.spatialDisc_.inputs_.U_INF_ = cos(alpha_rad);
-        this.spatialDisc_.inputs_.V_INF_ = sin(alpha_rad);
-        
-        // Also update local copy
-        this.inputs_.ALPHA_ = alpha_deg;
-        this.inputs_.U_INF_ = cos(alpha_rad);
-        this.inputs_.V_INF_ = sin(alpha_rad);
-    }
 }
 
 }

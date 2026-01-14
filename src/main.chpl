@@ -99,13 +99,7 @@ proc main() {
 
                 var unsteadySolver = new shared unsteadyTemporalDiscretization(spatialDisc, inputs);
                 unsteadySolver.initialize();
-                
-                // Use time-accurate solver for oscillating airfoil, else pseudo-time solver
-                if inputs.DUAL_TIME_STEP_ {
-                    unsteadySolver.solveUnsteady();
-                } else {
-                    unsteadySolver.solve();
-                }
+                unsteadySolver.solve();
             }
         }
 
