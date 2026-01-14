@@ -7,6 +7,62 @@ use C_PETSC;
 use petsc;
 use CTypes;
 
+proc interp(x: [] real(64), xp: [] real(64), fp: [] real(64)) {
+    if xp.size != fp.size {
+        halt("xp and fp must have the same length");
+    }
+    
+    if xp.size == 0 {
+        halt("xp and fp cannot be empty");
+    }
+    
+    var result: [x.domain] real(64);
+    
+    var xpLow = xp.domain.low;
+    var xpHigh = xp.domain.high;
+    var fpLow = fp.domain.low;
+    
+    for i in x.domain {
+        var xi = x[i];
+        
+        if xi <= xp[xpLow] {
+            // x is at or below the first point, return first fp value
+            result[i] = fp[fpLow];
+        } else if xi >= xp[xpHigh] {
+            // x is at or above the last point, return last fp value
+            result[i] = fp[fp.domain.high];
+        } else {
+            // Binary search for the interval containing xi
+            var lo = xpLow;
+            var hi = xpHigh;
+            
+            while lo < hi {
+                var mid = (lo + hi + 1) / 2;
+                if xp[mid] <= xi {
+                    lo = mid;
+                } else {
+                    hi = mid - 1;
+                }
+            }
+            
+            // Linear interpolation between xp[lo] and xp[lo+1]
+            var dx = xp[lo + 1] - xp[lo];
+            var t = (xi - xp[lo]) / dx;
+            var fpIdx = fpLow + (lo - xpLow);
+            result[i] = fp[fpIdx] + t * (fp[fpIdx + 1] - fp[fpIdx]);
+        }
+    }
+    
+    return result;
+}
+
+// Overload for single value interpolation
+proc interp(x: real(64), xp: [] real(64), fp: [] real(64)): real(64) {
+    var xArr: [0..0] real(64) = [x];
+    var result = interp(xArr, xp, fp);
+    return result[0];
+}
+
 proc l2Norm(array : [] real(64)) {
     var norm: real(64) = 0.0;
     forall val in array with (+ reduce norm) {

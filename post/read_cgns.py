@@ -85,6 +85,10 @@ def unsteadyHistory(filename) :
         data['Cd'] = f['Base/GlobalConvergenceHistory/Cd/ data'][:]
         data['Cm'] = f['Base/GlobalConvergenceHistory/Cm/ data'][:]
 
+        data['xWake'] = f['WakeBase/wake/WAKE_FLOW_SOLUTION_NC/xWake/ data'][:]
+        data['yWake'] = f['WakeBase/wake/WAKE_FLOW_SOLUTION_NC/yWake/ data'][:]
+        data['gammaWake'] = f['WakeBase/wake/WAKE_FLOW_SOLUTION_NC/gammaWake/ data'][:]
+
         return data
 
 
@@ -158,8 +162,7 @@ def make_gif_from_circulation(circulation_list, gif_name, duration=100):
 
 
 
-
-# data_unsteady = unsteadyHistory("../output/output_unsteady_test_82.cgns")
+# data_unsteady = unsteadyHistory("../output/output_200.cgns")
 # plt.figure()
 # plt.plot(data_unsteady['Alpha'], data_unsteady['Cl'], "->",label='Cl')
 
@@ -167,8 +170,8 @@ def make_gif_from_circulation(circulation_list, gif_name, duration=100):
 # plt.plot(data_unsteady['Time'], data_unsteady['Alpha'], label='Alpha')
 
 # circulation_list = []
-# for i in range(1, 82) :
-#     data = readCGNS(f"../output/output_unsteady_test_{i}.cgns")
+# for i in range(267, 347) :
+#     data = unsteadyHistory(f"../output/output_{i}.cgns")
 #     circulation_list.append(data['gammaWake'])
 
 # make_gif_from_circulation(
@@ -177,9 +180,9 @@ def make_gif_from_circulation(circulation_list, gif_name, duration=100):
 #             duration=100)
 
 
-data = readCGNS("../output/output_84.cgns")
-data2 = readCGNS("../output/output_85.cgns")
-data3 = readCGNS("../output/output_86.cgns")
+data = readCGNS("../output/output_A0.cgns")
+data2 = readCGNS("../output/output_31.cgns")
+data3 = readCGNS("../output/output_30.cgns")
 
 data_hspm = readHSPM("../output/HSPM_naca0012_A1-25.dat")
 

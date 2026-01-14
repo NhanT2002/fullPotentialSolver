@@ -83,6 +83,8 @@ config const ALPHA_PHASE : real(64);
 config const TIME_STEP : real(64);
 config const TIME_FINAL : real(64);
 config const CFL_UNSTEADY : real(64);
+config const WAKE_CONVECTION_VELOCITY : real(64) = 1.0;  // Wake convection velocity (default: freestream)
+config const LAGRANGIAN_WAKE : bool = true;  // Use Lagrangian vortex shedding (default: true for unsteady)
 
 config const q_crit : real(64);
 
@@ -185,6 +187,8 @@ record potentialInputs {
     var TIME_STEP_: real(64) = TIME_STEP;
     var TIME_FINAL_: real(64) = TIME_FINAL;
     var CFL_UNSTEADY_: real(64) = CFL_UNSTEADY;
+    var WAKE_CONVECTION_VELOCITY_: real(64) = WAKE_CONVECTION_VELOCITY;  // Wake convection velocity
+    var LAGRANGIAN_WAKE_: bool = LAGRANGIAN_WAKE;  // Use Lagrangian vortex shedding
 
     var q_crit_: real(64) = q_crit;
     var beta_crit_ = MACH_**2*q_crit / (1 + (GAMMA_ - 1)/2*MACH_**2*(1 - q_crit**2));

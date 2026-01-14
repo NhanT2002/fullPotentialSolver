@@ -37,6 +37,11 @@ class unsteadyTemporalDiscretization {
     var cdList_ = new list(real(64));
     var cmList_ = new list(real(64));
     var circulationList_ = new list(real(64));
+    var alphaList_ = new list(real(64));  // For oscillating airfoil hysteresis
+
+    // Physical time tracking for unsteady simulations
+    var physicalTime_: real(64) = 0.0;
+    var timeStep_: int = 0;
 
     // Gradient sensitivity to circulation: ∂(∇φ)/∂Γ for each cell
     // These capture how each cell's gradient depends on Γ through wake-crossing faces
@@ -50,10 +55,8 @@ class unsteadyTemporalDiscretization {
         this.spatialDisc_ = spatialDisc;
         this.inputs_ = inputs;
 
-        // When FREEZE_CIRCULATION is true, exclude wake variables from the system
-        const nWakeFace = if inputs.FREEZE_CIRCULATION_ then 0 else this.spatialDisc_.wakeFace_.size;
-        const M = spatialDisc.nelemDomain_*2 + nWakeFace;
-        const N = spatialDisc.nelemDomain_*2 + nWakeFace;
+        const M = spatialDisc.nelemDomain_*2;
+        const N = spatialDisc.nelemDomain_*2;
         this.gammaIndex_ = spatialDisc.nelemDomain_*2;  // 0-based index for Γ
         
         this.A_petsc = new owned PETSCmatrix_c(PETSC_COMM_SELF, "seqaij", M, M, N, N);
@@ -195,16 +198,6 @@ class unsteadyTemporalDiscretization {
                 }
             }
         }
-        // third block: dRes^(rho)/d(Γ) - only if wake is active
-        if !this.inputs_.FREEZE_CIRCULATION_ {
-            forall (i, face) in zip(this.spatialDisc_.wake_face_dom, this.spatialDisc_.wakeFace_) {
-                const elem1 = this.spatialDisc_.mesh_.edge2elem_[1, face];
-                const elem2 = this.spatialDisc_.mesh_.edge2elem_[2, face];
-                for elem in [elem1, elem2] {
-                    this.A_petsc.set(elem-1, 2*this.spatialDisc_.nelemDomain_ + i -1, 0.0);
-                }
-            }
-        }
         // fourth block: dRes^(phi)/d(rho)
         forall elem in 1..this.spatialDisc_.nelemDomain_ {
             this.A_petsc.set(this.spatialDisc_.nelemDomain_ + elem-1, elem-1, 0.0);
@@ -222,49 +215,6 @@ class unsteadyTemporalDiscretization {
                 }
             }
         }
-        // sixth block: dRes^(phi)/d(Γ) - only if wake is active
-        if !this.inputs_.FREEZE_CIRCULATION_ {
-            forall (i, face) in zip(this.spatialDisc_.wake_face_dom, this.spatialDisc_.wakeFace_) {
-                const elem1 = this.spatialDisc_.mesh_.edge2elem_[1, face];
-                const elem2 = this.spatialDisc_.mesh_.edge2elem_[2, face];
-
-                for elem in [elem1, elem2] {
-                    this.A_petsc.set(this.spatialDisc_.nelemDomain_ + elem-1, 2*this.spatialDisc_.nelemDomain_ + i -1, 0.0);
-                }
-            }
-        }
-
-        // seventh block: dRes^(wake)/d(phi) - only if wake is active
-        if !this.inputs_.FREEZE_CIRCULATION_ {
-            forall (i, face) in zip(this.spatialDisc_.wake_face_dom, this.spatialDisc_.wakeFace_) {
-                const elem1 = this.spatialDisc_.mesh_.edge2elem_[1, face];
-                const elem2 = this.spatialDisc_.mesh_.edge2elem_[2, face];
-                for elem in [elem1, elem2] {
-                    this.A_petsc.set(2*this.spatialDisc_.nelemDomain_ + i -1, this.spatialDisc_.nelemDomain_ + elem -1, 0.0);
-
-                    const faces = this.spatialDisc_.mesh_.elem2edge_[this.spatialDisc_.mesh_.elem2edgeIndex_[elem] + 1 .. this.spatialDisc_.mesh_.elem2edgeIndex_[elem + 1]];
-                    for face in faces {
-                        const elem1 = this.spatialDisc_.mesh_.edge2elem_[1, face];
-                        const elem2 = this.spatialDisc_.mesh_.edge2elem_[2, face];
-                        const neighbor = if elem1 == elem then elem2 else elem1;
-                        if neighbor <= this.spatialDisc_.nelemDomain_ {
-                            this.A_petsc.set(2*this.spatialDisc_.nelemDomain_ + i -1, this.spatialDisc_.nelemDomain_ + neighbor-1, 0.0);
-                        }
-                    }
-
-                }
-            }
-        }
-        // eighth block: dRes^(wake)/d(Γ) - only if wake is active
-        if !this.inputs_.FREEZE_CIRCULATION_ {
-            forall (i, face) in zip(this.spatialDisc_.wake_face_dom, this.spatialDisc_.wakeFace_) {
-                const elem1 = this.spatialDisc_.mesh_.edge2elem_[1, face];
-                const elem2 = this.spatialDisc_.mesh_.edge2elem_[2, face];
-                for elem in [elem1, elem2] {
-                    this.A_petsc.set(2*this.spatialDisc_.nelemDomain_ + i -1, 2*this.spatialDisc_.nelemDomain_ + i -1, 0.0);
-                }
-            }
-        }
 
         this.A_petsc.assemblyComplete();
         // this.A_petsc.matView();
@@ -277,14 +227,6 @@ class unsteadyTemporalDiscretization {
         this.assemble_dResRho_dPhi();
         this.assemble_dResPhi_dRho();
         this.assemble_dResPhi_dPhi();
-        
-        // Only assemble wake-related Jacobian blocks if not frozen
-        if !this.inputs_.FREEZE_CIRCULATION_ {
-            this.assemble_dResRho_dGamma();
-            this.assemble_dResPhi_dGamma();
-            this.assemble_dResWake_dPhi();
-            this.assemble_dResWake_dGamma();
-        }
         
         this.A_petsc.assemblyComplete();
         // this.A_petsc.matView();
@@ -618,58 +560,111 @@ class unsteadyTemporalDiscretization {
     }
 
     proc assemble_dResWake_dPhi() {
-        // Res_wake = (Γ_i - Γ_i^{n-1}) / dt + 0.5 * [u_upper^2 + v_upper^2 - (u_lower^2 + v_lower^2)]
-        forall (i, face) in zip(this.spatialDisc_.wake_face_dom, this.spatialDisc_.wakeFace_) {
+        // Wake convection model:
+        // For i=1 (Kutta): R_1 = Γ_1 - (φ_upper^TE - φ_lower^TE)
+        //   → ∂R_1/∂φ_upper = -(1 + ∇φ·Δs)
+        //   → ∂R_1/∂φ_lower = +(1 + ∇φ·Δs)
+        // For i>1 (convection): R_i = (Γ_i - Γ_i^{n-1})/dt + U_conv*(Γ_i - Γ_{i-1})/ds
+        //   → ∂R_i/∂φ = 0 (no dependence on φ)
+        
+        const upperTE = this.spatialDisc_.upperTEelem_;
+        const lowerTE = this.spatialDisc_.lowerTEelem_;
+        const dxUpper = this.spatialDisc_.deltaSupperTEx_;
+        const dyUpper = this.spatialDisc_.deltaSupperTEy_;
+        const dxLower = this.spatialDisc_.deltaSlowerTEx_;
+        const dyLower = this.spatialDisc_.deltaSlowerTEy_;
+        
+        // Only the first wake face (Kutta condition) depends on φ
+        const row = 2*this.spatialDisc_.nelemDomain_;  // Row for i=1
+        
+        // ∂R_1/∂φ_upperTE (diagonal contribution from gradient)
+        const sumWx_upper = this.spatialDisc_.lsGradQR_!.sumWx_[upperTE];
+        const sumWy_upper = this.spatialDisc_.lsGradQR_!.sumWy_[upperTE];
+        var dR_dPhi_upper = -(1.0 + (-sumWx_upper) * dxUpper + (-sumWy_upper) * dyUpper);
+        this.A_petsc.set(row, this.spatialDisc_.nelemDomain_ + upperTE - 1, dR_dPhi_upper);
+        
+        // ∂R_1/∂φ_lowerTE  
+        const sumWx_lower = this.spatialDisc_.lsGradQR_!.sumWx_[lowerTE];
+        const sumWy_lower = this.spatialDisc_.lsGradQR_!.sumWy_[lowerTE];
+        var dR_dPhi_lower = 1.0 + (-sumWx_lower) * dxLower + (-sumWy_lower) * dyLower;
+        this.A_petsc.set(row, this.spatialDisc_.nelemDomain_ + lowerTE - 1, dR_dPhi_lower);
+        
+        // Off-diagonal: neighbors of upper TE cell
+        const facesUpper = this.spatialDisc_.mesh_.elem2edge_[
+            this.spatialDisc_.mesh_.elem2edgeIndex_[upperTE] + 1 ..
+            this.spatialDisc_.mesh_.elem2edgeIndex_[upperTE + 1]];
+        for face in facesUpper {
             const elem1 = this.spatialDisc_.mesh_.edge2elem_[1, face];
             const elem2 = this.spatialDisc_.mesh_.edge2elem_[2, face];
-            for elem in [elem1, elem2] {
-                const sign = if this.spatialDisc_.kuttaCell_[elem] == 1 then 1.0 else -1.0;
-                const sumWx_elem = this.spatialDisc_.lsGradQR_!.sumWx_[elem];
-                const sumWy_elem = this.spatialDisc_.lsGradQR_!.sumWy_[elem];
-                const diag = sign * (this.spatialDisc_.uu_[elem] * (-sumWx_elem) + this.spatialDisc_.vv_[elem] * (-sumWy_elem));
-                this.A_petsc.set(2*this.spatialDisc_.nelemDomain_ + i -1, this.spatialDisc_.nelemDomain_ + elem -1, diag);
-
-                const faces = this.spatialDisc_.mesh_.elem2edge_[this.spatialDisc_.mesh_.elem2edgeIndex_[elem] + 1 .. this.spatialDisc_.mesh_.elem2edgeIndex_[elem + 1]];
-                for face in faces {
-                    const elem1 = this.spatialDisc_.mesh_.edge2elem_[1, face];
-                    const elem2 = this.spatialDisc_.mesh_.edge2elem_[2, face];
-                    const neighbor = if elem1 == elem then elem2 else elem1;
-
-                    if neighbor <= this.spatialDisc_.nelemDomain_ {
-                        var wx_elemToNeighbor: real(64);
-                        var wy_elemToNeighbor: real(64);
-                        if elem1 == elem {
-                            // elem is elem1, using weights from perspective 1
-                            wx_elemToNeighbor = this.spatialDisc_.lsGradQR_!.wxFinal1_[face];
-                            wy_elemToNeighbor = this.spatialDisc_.lsGradQR_!.wyFinal1_[face];
-                        } else {
-                            // elem is elem2, using weights from perspective 2
-                            wx_elemToNeighbor = this.spatialDisc_.lsGradQR_!.wxFinal2_[face];
-                            wy_elemToNeighbor = this.spatialDisc_.lsGradQR_!.wyFinal2_[face];
-                        }
-                        const offDiag = sign * (this.spatialDisc_.uu_[elem] * wx_elemToNeighbor + this.spatialDisc_.vv_[elem] * wy_elemToNeighbor);
-                        // Use add since elem1 and elem2 may share common neighbors
-                        this.A_petsc.add(2*this.spatialDisc_.nelemDomain_ + i -1, this.spatialDisc_.nelemDomain_ + neighbor-1, offDiag);
-                    }
+            const neighbor = if elem1 == upperTE then elem2 else elem1;
+            if neighbor <= this.spatialDisc_.nelemDomain_ {
+                var wx, wy: real(64);
+                if elem1 == upperTE {
+                    wx = this.spatialDisc_.lsGradQR_!.wxFinal1_[face];
+                    wy = this.spatialDisc_.lsGradQR_!.wyFinal1_[face];
+                } else {
+                    wx = this.spatialDisc_.lsGradQR_!.wxFinal2_[face];
+                    wy = this.spatialDisc_.lsGradQR_!.wyFinal2_[face];
                 }
-
+                const offDiag = -(wx * dxUpper + wy * dyUpper);
+                this.A_petsc.add(row, this.spatialDisc_.nelemDomain_ + neighbor - 1, offDiag);
             }
         }
+        
+        // Off-diagonal: neighbors of lower TE cell
+        const facesLower = this.spatialDisc_.mesh_.elem2edge_[
+            this.spatialDisc_.mesh_.elem2edgeIndex_[lowerTE] + 1 ..
+            this.spatialDisc_.mesh_.elem2edgeIndex_[lowerTE + 1]];
+        for face in facesLower {
+            const elem1 = this.spatialDisc_.mesh_.edge2elem_[1, face];
+            const elem2 = this.spatialDisc_.mesh_.edge2elem_[2, face];
+            const neighbor = if elem1 == lowerTE then elem2 else elem1;
+            if neighbor <= this.spatialDisc_.nelemDomain_ {
+                var wx, wy: real(64);
+                if elem1 == lowerTE {
+                    wx = this.spatialDisc_.lsGradQR_!.wxFinal1_[face];
+                    wy = this.spatialDisc_.lsGradQR_!.wyFinal1_[face];
+                } else {
+                    wx = this.spatialDisc_.lsGradQR_!.wxFinal2_[face];
+                    wy = this.spatialDisc_.lsGradQR_!.wyFinal2_[face];
+                }
+                const offDiag = wx * dxLower + wy * dyLower;
+                this.A_petsc.add(row, this.spatialDisc_.nelemDomain_ + neighbor - 1, offDiag);
+            }
+        }
+        
+        // For i > 1 (convection equations): ∂R_i/∂φ = 0, nothing to set
     }
 
     proc assemble_dResWake_dGamma() {
-        // Res_wake = (Γ_i - Γ_i^{n-1}) / dt + 0.5 * [u_upper^2 + v_upper^2 - (u_lower^2 + v_lower^2)]
-        forall (i, face) in zip(this.spatialDisc_.wake_face_dom, this.spatialDisc_.wakeFace_) {
-            const elem1 = this.spatialDisc_.mesh_.edge2elem_[1, face];
-            const elem2 = this.spatialDisc_.mesh_.edge2elem_[2, face];
+        // Wake convection model Jacobian:
+        // For i=1 (Kutta): R_1 = Γ_1 - (φ_upper^TE - φ_lower^TE)
+        //   → ∂R_1/∂Γ_1 = 1, ∂R_1/∂Γ_j = 0 for j≠1
+        // For i>1 (convection): R_i = (Γ_i - Γ_i^{n-1})/dt + U_conv*(Γ_i - Γ_{i-1})/ds
+        //   → ∂R_i/∂Γ_i = 1/dt + U_conv/ds_i
+        //   → ∂R_i/∂Γ_{i-1} = -U_conv/ds_i
+        
+        const U_conv = this.inputs_.WAKE_CONVECTION_VELOCITY_;
+        
+        for i in this.spatialDisc_.wake_face_dom {
+            const row = 2*this.spatialDisc_.nelemDomain_ + i - 1;
             
-            // Accumulate diagonal contribution from both adjacent elements
-            var diag = 1.0 / this.inputs_.TIME_STEP_;
-            for elem in [elem1, elem2] {
-                const sign = if this.spatialDisc_.kuttaCell_[elem] == 1 then 1.0 else -1.0;
-                diag += sign * (this.spatialDisc_.uu_[elem] * this.dgradX_dGamma_[elem] + this.spatialDisc_.vv_[elem] * this.dgradY_dGamma_[elem]);
+            if i == 1 {
+                // Kutta condition: R_1 = Γ_1 - gamma_kutta
+                // ∂R_1/∂Γ_1 = 1
+                this.A_petsc.set(row, row, 1.0);
+            } else {
+                // Convection: R_i = (Γ_i - Γ_i^{n-1})/dt + U_conv*(Γ_i - Γ_{i-1})/ds
+                const ds = this.spatialDisc_.wakeFaceX_[i] - this.spatialDisc_.wakeFaceX_[i-1];
+                
+                // Diagonal: ∂R_i/∂Γ_i = 1/dt + U_conv/ds
+                const diag = 1.0 / this.inputs_.TIME_STEP_ + U_conv / ds;
+                this.A_petsc.set(row, row, diag);
+                
+                // Sub-diagonal: ∂R_i/∂Γ_{i-1} = -U_conv/ds
+                const subdiag = -U_conv / ds;
+                this.A_petsc.set(row, row - 1, subdiag);
             }
-            this.A_petsc.set(2*this.spatialDisc_.nelemDomain_ + i -1, 2*this.spatialDisc_.nelemDomain_ + i -1, diag);
         }
     }
 
@@ -684,22 +679,22 @@ class unsteadyTemporalDiscretization {
         
         this.computeJacobian();
 
-        if this.inputs_.START_FILENAME_ != "" {
-            writeln("Initializing solution from file: ", this.inputs_.START_FILENAME_);
-            const (xElem, yElem, rho, phi, it, time, res, cl, cd, cm, circulation, wakeGamma) = readSolution(this.inputs_.START_FILENAME_);
-            for i in it.domain {
-                this.timeList_.pushBack(time[i]);
-                this.itList_.pushBack(it[i]);
-                this.resList_.pushBack(res[i]);
-                this.clList_.pushBack(cl[i]);
-                this.cdList_.pushBack(cd[i]);
-                this.cmList_.pushBack(cm[i]);
-                this.circulationList_.pushBack(circulation[i]);
-            }
-            this.it_ = it.last;
-            this.t0_ = time.last;
-            this.first_res_ = res.first;
-        }
+        // if this.inputs_.START_FILENAME_ != "" {
+        //     writeln("Initializing solution from file: ", this.inputs_.START_FILENAME_);
+        //     const (xElem, yElem, rho, phi, it, time, res, cl, cd, cm, circulation, wakeGamma) = readSolution(this.inputs_.START_FILENAME_);
+        //     for i in it.domain {
+        //         this.timeList_.pushBack(time[i]);
+        //         this.itList_.pushBack(it[i]);
+        //         this.resList_.pushBack(res[i]);
+        //         this.clList_.pushBack(cl[i]);
+        //         this.cdList_.pushBack(cd[i]);
+        //         this.cmList_.pushBack(cm[i]);
+        //         this.circulationList_.pushBack(circulation[i]);
+        //     }
+        //     this.it_ = it.last;
+        //     this.t0_ = time.last;
+        //     this.first_res_ = res.first;
+        // }
 
         // Reset adaptive upwinding state for new Mach number
         this.inputs_.upwindAdapted_ = false;
@@ -726,119 +721,31 @@ class unsteadyTemporalDiscretization {
         const OMEGA_MIN : real(64) = 0.1;  // Minimum allowed OMEGA
         const OMEGA_DECREASE : real(64) = 0.5;  // Factor to decrease OMEGA in line search
         var time: stopwatch;
+        const dt = this.inputs_.TIME_STEP_;
+        const t_final = this.inputs_.TIME_FINAL_;
+        var physicalTime = 0.0; 
         
         // Arrays to store state for line search (backtracking)
         var phi_backup: [1..this.spatialDisc_.nelemDomain_] real(64);
         var circulation_backup: real(64);
 
-        // Initial residual
-        res = RMSE(this.spatialDisc_.res_, this.spatialDisc_.elemVolume_);
-        resPhi = RMSE(this.spatialDisc_.resPhi_, this.spatialDisc_.elemVolume_);
-        resWake = RMSE(this.spatialDisc_.resWake_);
-        if this.inputs_.START_FILENAME_ == "" {
-            this.first_res_ = res;
-        }
-        normalized_res = res / this.first_res_;
-        const res_wall = RMSE(this.spatialDisc_.res_[this.spatialDisc_.wall_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.wall_dom]);
-        const res_fluid = RMSE(this.spatialDisc_.res_[this.spatialDisc_.fluid_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.fluid_dom]);
-        const res_wake = RMSE(this.spatialDisc_.res_[this.spatialDisc_.wake_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.wake_dom]);
-        const res_shock = RMSE(this.spatialDisc_.res_[this.spatialDisc_.shock_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.shock_dom]);
-        const (Cl, Cd, Cm) = this.spatialDisc_.computeAerodynamicCoefficients();
-        const elapsed = this.t0_;
-        writeln(" Time: ", elapsed, " It: ", this.it_,
-                " res: ", res, " norm res: ", normalized_res, " phi res: ", resPhi, " wake res: ", resWake,
-                " res wall: ", res_wall, " res fluid: ", res_fluid, " res wake: ", res_wake, " res shock: ", res_shock,
-                " Cl: ", Cl, " Cd: ", Cd, " Cm: ", Cm, " Circulation: ", this.spatialDisc_.circulation_);
-        this.timeList_.pushBack(elapsed);
-        this.itList_.pushBack(this.it_);
-        this.resList_.pushBack(res);
-        this.clList_.pushBack(Cl);
-        this.cdList_.pushBack(Cd);
-        this.cmList_.pushBack(Cm);
-        this.circulationList_.pushBack(this.spatialDisc_.circulation_);
-
-        while ((normalized_res > this.inputs_.CONV_TOL_ && res > this.inputs_.CONV_ATOL_) && this.it_ < this.inputs_.IT_MAX_ && isNan(normalized_res) == false) {
-            this.it_ += 1;
-            time.start();
-
-            // === ADAPTIVE UPWINDING (Crovato thesis) ===
-            // Start with strong stabilization (high MU_C, low MACH_C), then switch to
-            // accurate values (low MU_C, high MACH_C) once residual drops below threshold
-            if this.inputs_.ADAPTIVE_UPWIND_ && !this.inputs_.upwindAdapted_ {
-                if normalized_res < this.inputs_.ADAPT_THRESHOLD_ {
-                    this.spatialDisc_.inputs_.MU_C_ = this.inputs_.MU_C_FINAL_;
-                    this.spatialDisc_.inputs_.MACH_C_ = this.inputs_.MACH_C_FINAL_;
-                    this.inputs_.upwindAdapted_ = true;
-                    writeln("  >>> Adaptive upwinding: switching to MU_C=", this.spatialDisc_.inputs_.MU_C_, ", MACH_C=", this.spatialDisc_.inputs_.MACH_C_);
-                }
-            }
-
-            // === ADAPTIVE BETA (for Newton consistency / quadratic convergence) ===
-            // Start with non-zero BETA for Jacobian conditioning, reduce to zero near
-            // convergence to restore true Newton method with quadratic convergence rate
-            if this.inputs_.ADAPTIVE_BETA_ && !this.inputs_.betaAdapted_ {
-                if normalized_res < this.inputs_.BETA_THRESHOLD_ {
-                    this.inputs_.BETA_ = this.inputs_.BETA_FINAL_;
-                    this.inputs_.betaAdapted_ = true;
-                    writeln("  >>> Adaptive BETA: switching to BETA=", this.inputs_.BETA_, " for Newton consistency");
-                }
-            }
-
-            this.computeJacobian();
-            
-            // Always use full Newton step in RHS (omega will be applied to the solution update)
-            forall elem in 1..this.spatialDisc_.nelemDomain_ {
-                this.b_petsc.set(elem-1, -this.spatialDisc_.res_[elem]);
-            }
-            forall elem in 1..this.spatialDisc_.nelemDomain_ {
-                this.b_petsc.set(this.spatialDisc_.nelemDomain_ + elem-1, -this.spatialDisc_.resPhi_[elem]);
-            }
-            // Only set wake RHS if not frozen
-            if !this.inputs_.FREEZE_CIRCULATION_ {
-                forall (i, face) in zip(this.spatialDisc_.wake_face_dom, this.spatialDisc_.wakeFace_) {
-                    this.b_petsc.set(2*this.spatialDisc_.nelemDomain_ + i -1, -this.spatialDisc_.resWake_[i]);
-                }
-            }
-            this.b_petsc.assemblyComplete();
-
-            // === PETSC GMRES ===
-            const (its, reason) = GMRES(this.ksp, this.A_petsc, this.b_petsc, this.x_petsc);
-
-            // Apply solution update: x = [rho_1..rho_N, phi_1..phi_N, Γ_1..Γ_M]
-            forall elem in 1..this.spatialDisc_.nelemDomain_ {
-                this.spatialDisc_.rhorho_[elem] += omega * this.x_petsc.get(elem-1);  // rho block
-                this.spatialDisc_.phi_[elem] += omega * this.x_petsc.get(this.spatialDisc_.nelemDomain_ + elem-1);  // phi block
-            }
-            // Only update wake if not frozen
-            if !this.inputs_.FREEZE_CIRCULATION_ {
-                forall (i, face) in zip(this.spatialDisc_.wake_face_dom, this.spatialDisc_.wakeFace_) {
-                    this.spatialDisc_.wakeFaceGamma_[i] += omega * this.x_petsc.get(2*this.spatialDisc_.nelemDomain_ + i -1);
-                }
-            }
-            
-            // Compute residual for convergence check
+        while physicalTime < t_final {
+            // Initial residual
             this.spatialDisc_.run();
             res = RMSE(this.spatialDisc_.res_, this.spatialDisc_.elemVolume_);
-            normalized_res = res / this.first_res_;
-
             resPhi = RMSE(this.spatialDisc_.resPhi_, this.spatialDisc_.elemVolume_);
-            resWake = RMSE(this.spatialDisc_.resWake_);
-
+            this.first_res_ = res;
+            normalized_res = res / this.first_res_;
             const res_wall = RMSE(this.spatialDisc_.res_[this.spatialDisc_.wall_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.wall_dom]);
             const res_fluid = RMSE(this.spatialDisc_.res_[this.spatialDisc_.fluid_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.fluid_dom]);
             const res_wake = RMSE(this.spatialDisc_.res_[this.spatialDisc_.wake_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.wake_dom]);
             const res_shock = RMSE(this.spatialDisc_.res_[this.spatialDisc_.shock_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.shock_dom]);
-
             const (Cl, Cd, Cm) = this.spatialDisc_.computeAerodynamicCoefficients();
-            time.stop();
-            const elapsed = time.elapsed() + this.t0_;
+            const elapsed = this.t0_;
             writeln(" Time: ", elapsed, " It: ", this.it_,
-                    " res: ", res, " norm res: ", normalized_res, " phi res: ", resPhi, " wake res: ", resWake,
+                    " res: ", res, " norm res: ", normalized_res, " phi res: ", resPhi, " kutta res: ", this.spatialDisc_.kutta_res_,
                     " res wall: ", res_wall, " res fluid: ", res_fluid, " res wake: ", res_wake, " res shock: ", res_shock,
-                    " Cl: ", Cl, " Cd: ", Cd, " Cm: ", Cm, " Circulation: ", this.spatialDisc_.circulation_,
-                    " GMRES its: ", its, " reason: ", reason, " omega: ", omega);
-            
-
+                    " Cl: ", Cl, " Cd: ", Cd, " Cm: ", Cm, " Circulation: ", this.spatialDisc_.circulation_);
             this.timeList_.pushBack(elapsed);
             this.itList_.pushBack(this.it_);
             this.resList_.pushBack(res);
@@ -846,14 +753,295 @@ class unsteadyTemporalDiscretization {
             this.cdList_.pushBack(Cd);
             this.cmList_.pushBack(Cm);
             this.circulationList_.pushBack(this.spatialDisc_.circulation_);
-            
-            if this.it_ % this.inputs_.CGNS_OUTPUT_FREQ_ == 0 {
-                this.spatialDisc_.writeSolution(this.timeList_, this.itList_, this.resList_, this.clList_, this.cdList_, this.cmList_, this.circulationList_);
+            while ((normalized_res > this.inputs_.CONV_TOL_ && res > this.inputs_.CONV_ATOL_) && this.it_ < this.inputs_.IT_MAX_ && isNan(normalized_res) == false) {
+                this.it_ += 1;
+                time.start();
+
+                this.computeJacobian();
+                
+                // Always use full Newton step in RHS (omega will be applied to the solution update)
+                forall elem in 1..this.spatialDisc_.nelemDomain_ {
+                    this.b_petsc.set(elem-1, -this.spatialDisc_.res_[elem]);
+                }
+                forall elem in 1..this.spatialDisc_.nelemDomain_ {
+                    this.b_petsc.set(this.spatialDisc_.nelemDomain_ + elem-1, -this.spatialDisc_.resPhi_[elem]);
+                }
+                this.b_petsc.assemblyComplete();
+
+                // === PETSC GMRES ===
+                const (its, reason) = GMRES(this.ksp, this.A_petsc, this.b_petsc, this.x_petsc);
+
+                // Apply solution update: x = [rho_1..rho_N, phi_1..phi_N, Γ_1..Γ_M]
+                forall elem in 1..this.spatialDisc_.nelemDomain_ {
+                    this.spatialDisc_.rhorho_[elem] += omega * this.x_petsc.get(elem-1);  // rho block
+                    this.spatialDisc_.phi_[elem] += omega * this.x_petsc.get(this.spatialDisc_.nelemDomain_ + elem-1);  // phi block
+                }
+                
+                // Compute residual for convergence check
+                this.spatialDisc_.run();
+                res = RMSE(this.spatialDisc_.res_, this.spatialDisc_.elemVolume_);
+                normalized_res = res / this.first_res_;
+
+                resPhi = RMSE(this.spatialDisc_.resPhi_, this.spatialDisc_.elemVolume_);
+
+                const res_wall = RMSE(this.spatialDisc_.res_[this.spatialDisc_.wall_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.wall_dom]);
+                const res_fluid = RMSE(this.spatialDisc_.res_[this.spatialDisc_.fluid_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.fluid_dom]);
+                const res_wake = RMSE(this.spatialDisc_.res_[this.spatialDisc_.wake_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.wake_dom]);
+                const res_shock = RMSE(this.spatialDisc_.res_[this.spatialDisc_.shock_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.shock_dom]);
+
+                const (Cl, Cd, Cm) = this.spatialDisc_.computeAerodynamicCoefficients();
+                time.stop();
+                const elapsed = time.elapsed() + this.t0_;
+                writeln(" Time: ", elapsed, " It: ", this.it_,
+                        " res: ", res, " norm res: ", normalized_res, " phi res: ", resPhi, " kutta res: ", this.spatialDisc_.kutta_res_,
+                        " res wall: ", res_wall, " res fluid: ", res_fluid, " res wake: ", res_wake, " res shock: ", res_shock,
+                        " Cl: ", Cl, " Cd: ", Cd, " Cm: ", Cm, " Circulation: ", this.spatialDisc_.circulation_,
+                        " GMRES its: ", its, " reason: ", reason, " omega: ", omega);
+                
+
+                this.timeList_.pushBack(elapsed);
+                this.itList_.pushBack(this.it_);
+                this.resList_.pushBack(res);
+                this.clList_.pushBack(Cl);
+                this.cdList_.pushBack(Cd);
+                this.cmList_.pushBack(Cm);
+                this.circulationList_.pushBack(this.spatialDisc_.circulation_);
+                
+                if this.it_ % this.inputs_.CGNS_OUTPUT_FREQ_ == 0 {
+                    this.spatialDisc_.writeSolution(this.timeList_, this.itList_, this.resList_, this.clList_, this.cdList_, this.cmList_, this.circulationList_);
+                }
             }
-        }
+
+            writeln("=== Time step ", this.timeStep_, " complete: t = ", physicalTime, " ===");
+
+            // Advance physical time
+            forall elem in 1..this.spatialDisc_.nelemDomain_ {
+                this.spatialDisc_.phi_m1_[elem] = this.spatialDisc_.phi_[elem];
+                this.spatialDisc_.rhorho_m1_[elem] = this.spatialDisc_.rhorho_[elem];
+            }
+            // Convect vortices in Lagrangian wake
+            for i in 1..this.spatialDisc_.nVortices_ by -1 {
+                this.spatialDisc_.vortexGamma_[i] = this.spatialDisc_.vortexGamma_[i-1];
+            }
+
+            physicalTime += dt;
+            this.timeStep_ += 1;
+        } 
+        
 
         this.spatialDisc_.writeSolution(this.timeList_, this.itList_, this.resList_, this.clList_, this.cdList_, this.cmList_, this.circulationList_);
 
+    }
+
+    /*
+     * Time-accurate unsteady solver for oscillating airfoil
+     *
+     * Outer loop: Physical time steps (advance from t=0 to t=TIME_FINAL)
+     * Inner loop: Newton iterations to converge each time step
+     *
+     * The angle of attack oscillates as:
+     *   α(t) = α_0 + α_amp * sin(2π * k * t + φ)
+     * where k is the reduced frequency
+     */
+    proc solveUnsteady() {
+        const dt = this.inputs_.TIME_STEP_;
+        const t_final = this.inputs_.TIME_FINAL_;
+        const alpha_0 = this.inputs_.ALPHA_0_;      // Mean angle [degrees]
+        const alpha_amp = this.inputs_.ALPHA_AMPLITUDE_;  // Amplitude [degrees]
+        const k = this.inputs_.ALPHA_FREQUENCY_;    // Reduced frequency
+        const phi = this.inputs_.ALPHA_PHASE_;      // Phase [radians]
+        const pi = 3.14159265358979323846;
+        
+        // Inner Newton iteration parameters
+        const newton_tol = this.inputs_.CONV_TOL_;
+        const newton_max_it = this.inputs_.IT_MAX_;
+        var omega = this.inputs_.OMEGA_;
+        
+        var time_watch: stopwatch;
+        time_watch.start();
+        
+        writeln("=== Starting time-accurate unsteady simulation ===");
+        writeln("  Time step dt = ", dt);
+        writeln("  Final time = ", t_final);
+        writeln("  Alpha_0 = ", alpha_0, " deg, Amplitude = ", alpha_amp, " deg");
+        writeln("  Reduced frequency k = ", k);
+        
+        // Initialize at t=0
+        this.physicalTime_ = 0.0;
+        this.timeStep_ = 0;
+        
+        // Compute initial alpha
+        var alpha_current = alpha_0 + alpha_amp * sin(2.0*pi*k*this.physicalTime_ + phi);
+        this.updateAlpha(alpha_current);
+        
+        // Initial residual computation
+        this.spatialDisc_.run();
+        var res = RMSE(this.spatialDisc_.res_, this.spatialDisc_.elemVolume_);
+        this.first_res_ = res;
+        
+        // Store initial state
+        const (Cl_init, Cd_init, Cm_init) = this.spatialDisc_.computeAerodynamicCoefficients();
+        this.timeList_.pushBack(this.physicalTime_);
+        this.alphaList_.pushBack(alpha_current);
+        this.clList_.pushBack(Cl_init);
+        this.cdList_.pushBack(Cd_init);
+        this.cmList_.pushBack(Cm_init);
+        this.circulationList_.pushBack(this.spatialDisc_.circulation_);
+        this.resList_.pushBack(res);
+        this.itList_.pushBack(0);
+        
+        // Debug: print gamma_kutta at t=0
+        {
+            const phi_upper_TE = this.spatialDisc_.phi_[this.spatialDisc_.upperTEelem_] 
+                               + this.spatialDisc_.uu_[this.spatialDisc_.upperTEelem_] * this.spatialDisc_.deltaSupperTEx_
+                               + this.spatialDisc_.vv_[this.spatialDisc_.upperTEelem_] * this.spatialDisc_.deltaSupperTEy_;
+            const phi_lower_TE = this.spatialDisc_.phi_[this.spatialDisc_.lowerTEelem_]
+                               + this.spatialDisc_.uu_[this.spatialDisc_.lowerTEelem_] * this.spatialDisc_.deltaSlowerTEx_
+                               + this.spatialDisc_.vv_[this.spatialDisc_.lowerTEelem_] * this.spatialDisc_.deltaSlowerTEy_;
+            const gamma_kutta_init = phi_upper_TE - phi_lower_TE;
+            writeln("  [t=0 debug] phi_upper=", phi_upper_TE, " phi_lower=", phi_lower_TE, 
+                    " gamma_kutta=", gamma_kutta_init);
+        }
+        
+        writeln(" t=", this.physicalTime_, " alpha=", alpha_current, " Cl=", Cl_init, " Cd=", Cd_init, " Gamma=", this.spatialDisc_.circulation_);
+        
+        // Time stepping loop
+        while this.physicalTime_ < t_final {
+            this.timeStep_ += 1;
+            this.physicalTime_ += dt;
+            
+            // Update angle of attack for this time step
+            alpha_current = alpha_0 + alpha_amp * sin(2.0*pi*k*this.physicalTime_ + phi);
+            this.updateAlpha(alpha_current);
+            
+            // Lagrangian wake: convect vortices from previous time step
+            // then interpolate to wake faces (except first which will be updated during Newton)
+            if this.inputs_.LAGRANGIAN_WAKE_ {
+                this.spatialDisc_.convectVortices();
+                this.spatialDisc_.interpolateToWake();
+                // Initialize first wake face with current Kutta gamma
+                this.spatialDisc_.updateKuttaGamma();
+            }
+            
+            // Newton iteration to converge this time step
+            this.spatialDisc_.run();
+            res = RMSE(this.spatialDisc_.res_, this.spatialDisc_.elemVolume_);
+            // Use residual at start of this time step for normalization
+            const first_res_timestep = max(res, 1e-12);
+            var normalized_res = 1.0;  // Start at 1
+            var newton_it = 0;
+            
+            // Converge until relative residual < tolerance OR absolute residual is very small
+            const abs_tol = 1e-10;
+            while (normalized_res > newton_tol && res > abs_tol && newton_it < newton_max_it) {
+                newton_it += 1;
+                this.it_ += 1;
+                
+                // Compute Jacobian and solve Newton system
+                this.computeJacobian();
+                
+                // Set RHS
+                forall elem in 1..this.spatialDisc_.nelemDomain_ {
+                    this.b_petsc.set(elem-1, -this.spatialDisc_.res_[elem]);
+                }
+                forall elem in 1..this.spatialDisc_.nelemDomain_ {
+                    this.b_petsc.set(this.spatialDisc_.nelemDomain_ + elem-1, -this.spatialDisc_.resPhi_[elem]);
+                }
+                // Wake RHS only if not using Lagrangian or frozen circulation
+                if !this.inputs_.FREEZE_CIRCULATION_ && !this.inputs_.LAGRANGIAN_WAKE_ {
+                    forall (i, face) in zip(this.spatialDisc_.wake_face_dom, this.spatialDisc_.wakeFace_) {
+                        this.b_petsc.set(2*this.spatialDisc_.nelemDomain_ + i -1, -this.spatialDisc_.resWake_[i]);
+                    }
+                }
+                this.b_petsc.assemblyComplete();
+                
+                // Solve linear system
+                const (its, reason) = GMRES(this.ksp, this.A_petsc, this.b_petsc, this.x_petsc);
+                
+                // Apply solution update
+                forall elem in 1..this.spatialDisc_.nelemDomain_ {
+                    this.spatialDisc_.rhorho_[elem] += omega * this.x_petsc.get(elem-1);
+                    this.spatialDisc_.phi_[elem] += omega * this.x_petsc.get(this.spatialDisc_.nelemDomain_ + elem-1);
+                }
+                // Wake update only if not using Lagrangian or frozen circulation
+                if !this.inputs_.FREEZE_CIRCULATION_ && !this.inputs_.LAGRANGIAN_WAKE_ {
+                    forall (i, face) in zip(this.spatialDisc_.wake_face_dom, this.spatialDisc_.wakeFace_) {
+                        this.spatialDisc_.wakeFaceGamma_[i] += omega * this.x_petsc.get(2*this.spatialDisc_.nelemDomain_ + i -1);
+                    }
+                    this.spatialDisc_.circulation_ = this.spatialDisc_.wakeFaceGamma_[1];
+                }
+                
+                // Lagrangian wake: update first wake face with current Kutta gamma
+                if this.inputs_.LAGRANGIAN_WAKE_ {
+                    this.spatialDisc_.updateKuttaGamma();
+                }
+                
+                // Compute new residual
+                this.spatialDisc_.run();
+                res = RMSE(this.spatialDisc_.res_, this.spatialDisc_.elemVolume_);
+                normalized_res = res / first_res_timestep;
+            }
+            
+            // After Newton convergence: update Lagrangian wake (once per time step)
+            if this.inputs_.LAGRANGIAN_WAKE_ {
+                this.spatialDisc_.shedVortex();
+                this.spatialDisc_.interpolateToWake();
+            }
+            
+            // Update previous time level for next time step's time derivative
+            forall elem in 1..this.spatialDisc_.nelemDomain_ {
+                this.spatialDisc_.phi_m1_[elem] = this.spatialDisc_.phi_[elem];
+                this.spatialDisc_.rhorho_m1_[elem] = this.spatialDisc_.rhorho_[elem];
+            }
+            this.spatialDisc_.wakeFaceGamma_m1_ = this.spatialDisc_.wakeFaceGamma_;
+            
+            // Time step converged - store results
+            const (Cl, Cd, Cm) = this.spatialDisc_.computeAerodynamicCoefficients();
+            
+            this.timeList_.pushBack(this.physicalTime_);
+            this.alphaList_.pushBack(alpha_current);
+            this.clList_.pushBack(Cl);
+            this.cdList_.pushBack(Cd);
+            this.cmList_.pushBack(Cm);
+            this.circulationList_.pushBack(this.spatialDisc_.circulation_);
+            this.resList_.pushBack(res);
+            this.itList_.pushBack(newton_it);
+            
+            time_watch.stop();
+            writeln(" t=", this.physicalTime_, " alpha=", alpha_current, 
+                    " Cl=", Cl, " Cd=", Cd, " Gamma=", this.spatialDisc_.circulation_,
+                    " Newton its=", newton_it, " res=", normalized_res,
+                    " wall time=", time_watch.elapsed());
+            time_watch.start();
+            
+            // Write output for every time step (includes wake gammas)
+            this.spatialDisc_.writeSolutionUnsteady(this.timeList_, this.alphaList_, this.clList_, this.cdList_, this.cmList_, this.circulationList_);
+        }
+        
+        // Final output
+        this.spatialDisc_.writeSolutionUnsteady(this.timeList_, this.alphaList_, this.clList_, this.cdList_, this.cmList_, this.circulationList_);
+        
+        writeln("=== Unsteady simulation complete ===");
+        writeln("  Total time steps: ", this.timeStep_);
+        writeln("  Total Newton iterations: ", this.it_);
+    }
+
+    /*
+     * Update angle of attack and recompute freestream conditions
+     */
+    proc updateAlpha(alpha_deg: real(64)) {
+        const pi = 3.14159265358979323846;
+        const alpha_rad = alpha_deg * pi / 180.0;
+        
+        // Update freestream velocity components
+        this.spatialDisc_.inputs_.ALPHA_ = alpha_deg;
+        this.spatialDisc_.inputs_.U_INF_ = cos(alpha_rad);
+        this.spatialDisc_.inputs_.V_INF_ = sin(alpha_rad);
+        
+        // Also update local copy
+        this.inputs_.ALPHA_ = alpha_deg;
+        this.inputs_.U_INF_ = cos(alpha_rad);
+        this.inputs_.V_INF_ = sin(alpha_rad);
     }
 }
 

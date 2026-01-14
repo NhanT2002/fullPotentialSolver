@@ -493,7 +493,7 @@ class LeastSquaresGradientQR {
                     try {
                         const wakeIndex = wakeFace2index[face];
                         const gamma = wakeFaceGamma[wakeIndex];
-                        phiJ -= gamma;
+                        phiJ += gamma;
                     }
                     catch e: Error {
                         halt("Error: Face ", face, " not found in wakeFace2index map.");
@@ -505,7 +505,7 @@ class LeastSquaresGradientQR {
                     try {
                         const wakeIndex = wakeFace2index[face];
                         const gamma = wakeFaceGamma[wakeIndex];
-                        phiJ += gamma;
+                        phiJ -= gamma;
                     }
                     catch e: Error {
                         halt("Error: Face ", face, " not found in wakeFace2index map.");
