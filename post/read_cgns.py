@@ -25,6 +25,7 @@ def readCGNS(filename) :
         VelocityX_wall = f['WallBase/wall/WALL_FLOW_SOLUTION_CC/uWall/ data'][:]
         VelocityY_wall = f['WallBase/wall/WALL_FLOW_SOLUTION_CC/vWall/ data'][:]
         Cp = f['WallBase/wall/WALL_FLOW_SOLUTION_CC/cpWall/ data'][:]
+        mach = f['WallBase/wall/WALL_FLOW_SOLUTION_CC/machWall/ data'][:]
 
         xWake = f['WakeBase/wake/WAKE_FLOW_SOLUTION_NC/xWake/ data'][:]
         yWake = f['WakeBase/wake/WAKE_FLOW_SOLUTION_NC/yWake/ data'][:]
@@ -58,6 +59,7 @@ def readCGNS(filename) :
         data['VelocityX_wall'] = VelocityX_wall
         data['VelocityY_wall'] = VelocityY_wall
         data['Cp_wall'] = Cp
+        data['machWall'] = mach
 
         data['it'] = it
         data['time'] = time
@@ -160,7 +162,78 @@ def make_gif_from_circulation(circulation_list, gif_name, duration=100):
     )
     print(f"GIF saved as: {gif_name}")
 
+def make_gif_from_cp(x_list, cp_list, res_list, gif_name, duration=100):
+    """
+    Generate a GIF from a list of circulation (gammaWake) arrays.
+    
+    Parameters:
+    -----------
+    circulation_list : list of arrays
+        List containing gammaWake data from each timestep
+    gif_name : str
+        Output filename for the GIF
+    duration : int
+        Duration of each frame in milliseconds
+    """
+    images = []
+    
+    # Find global min/max for consistent y-axis scaling
+    all_values = np.concatenate([c.flatten() for c in cp_list])
+    y_min, y_max = np.min(all_values), np.max(all_values)
+    # Add some padding
+    y_range = y_max - y_min
+    y_min -= 0.1 * y_range
+    y_max += 0.1 * y_range
+    
+    for i, cp in enumerate(cp_list):
+        fig, ax = plt.subplots(figsize=(10, 6))
+        
+        # Plot circulation distribution
+        ax.plot(x_list[i], cp.flatten(), 'b-', linewidth=1.5, label=f'Residual: {res_list[i]:.5e}')
+        ax.invert_yaxis()
+        ax.set_xlabel('x', fontsize=12)
+        ax.set_ylabel('Cp', fontsize=12)
+        ax.set_title(f'Pressure Coefficient Distribution - Timestep {i+1}', fontsize=14)
+        ax.set_ylim(y_max, y_min)
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        # Convert plot to image
+        buf = io.BytesIO()
+        fig.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+        buf.seek(0)
+        images.append(Image.open(buf).copy())
+        buf.close()
+        plt.close(fig)
+        
+        # Progress indicator
+        if (i + 1) % 20 == 0:
+            print(f"Processed {i + 1}/{len(cp_list)} frames")
+    
+    # Save as GIF
+    images[0].save(
+        gif_name,
+        save_all=True,
+        append_images=images[1:],
+        duration=duration,
+        loop=0
+    )
+    print(f"GIF saved as: {gif_name}")
 
+# x_list = []
+# cp_list = []
+# res_list = []
+# for i in range(1, 266) :
+#     data = readCGNS(f"../output/output_{i}.cgns")
+#     x_list.append(data['X_wall'])
+#     cp_list.append(data['Cp_wall'])
+#     res_list.append(data['res'][-1])
+
+# make_gif_from_cp(
+#             x_list, 
+#             cp_list, 
+#             res_list,
+#             "cp_distribution_animation.gif", 
+#             duration=100)
 
 # data_unsteady = unsteadyHistory("../output/output_200.cgns")
 # plt.figure()
@@ -180,22 +253,32 @@ def make_gif_from_circulation(circulation_list, gif_name, duration=100):
 #             duration=100)
 
 
-data = readCGNS("../output/output_A0.cgns")
-data2 = readCGNS("../output/output_31.cgns")
-data3 = readCGNS("../output/output_66.cgns")
+data = readCGNS("../output/output_345.cgns")
+data2 = readCGNS("../output/output_346.cgns")
+data3 = readCGNS("../output/output_347.cgns")
 
 data_hspm = readHSPM("../output/HSPM_naca0012_A1-25.dat")
 
 
 plt.figure()
-plt.plot(data['X_wall'], data['Cp_wall'], '-', label='data')
-plt.plot(data2['X_wall'], data2['Cp_wall'], '-', label='data2')
-plt.plot(data3['X_wall'], data3['Cp_wall'], '-', label='data3')
+plt.plot(data['X_wall'], data['Cp_wall'], '-', label=f'data, Cl={data["cl"][-1]:.4f}, Cd={data["cd"][-1]:.4f}')
+plt.plot(data2['X_wall'], data2['Cp_wall'], '-', label=f'data2, Cl={data2["cl"][-1]:.4f}, Cd={data2["cd"][-1]:.4f}')
+plt.plot(data3['X_wall'], data3['Cp_wall'], '-', label=f'data3, Cl={data3["cl"][-1]:.4f}, Cd={data3["cd"][-1]:.4f}')
 # plt.plot(data_hspm['X_wall'], data_hspm['Cp_wall'], '-', label='HSPM')
 plt.gca().invert_yaxis()
 plt.xlabel('x')
 plt.ylabel('Cp on wall')
 plt.title('Pressure Coefficient Distribution on Wall')
+plt.legend()
+plt.grid()
+
+plt.figure()
+plt.plot(data['X_wall'], data['machWall'], '-', label=f'data, Cl={data["cl"][-1]:.4f}, Cd={data["cd"][-1]:.4f}')
+plt.plot(data2['X_wall'], data2['machWall'], '-', label=f'data2, Cl={data2["cl"][-1]:.4f}, Cd={data2["cd"][-1]:.4f}')
+plt.plot(data3['X_wall'], data3['machWall'], '-', label=f'data3, Cl={data3["cl"][-1]:.4f}, Cd={data3["cd"][-1]:.4f}')
+plt.xlabel('x')
+plt.ylabel('Mach on wall')
+plt.title('Mach Number Distribution on Wall')
 plt.legend()
 plt.grid()
 

@@ -474,6 +474,8 @@ class temporalDiscretization {
                 var wy_elemToNeighbor: real(64);
                 var wx_neighborToElem: real(64);
                 var wy_neighborToElem: real(64);
+                var faceWeightElem: real(64);
+                var faceWeightNeighbor: real(64);
                 
                 if elem1 == elem {
                     // elem is elem1, using weights from perspective 1
@@ -481,12 +483,23 @@ class temporalDiscretization {
                     wy_elemToNeighbor = this.spatialDisc_.lsGradQR_!.wyFinal1_[face];
                     wx_neighborToElem = this.spatialDisc_.lsGradQR_!.wxFinal2_[face];
                     wy_neighborToElem = this.spatialDisc_.lsGradQR_!.wyFinal2_[face];
+                    faceWeightElem = this.spatialDisc_.weights1_[face];
+                    faceWeightNeighbor = this.spatialDisc_.weights2_[face];
                 } else {
                     // elem is elem2, using weights from perspective 2
                     wx_elemToNeighbor = this.spatialDisc_.lsGradQR_!.wxFinal2_[face];
                     wy_elemToNeighbor = this.spatialDisc_.lsGradQR_!.wyFinal2_[face];
                     wx_neighborToElem = this.spatialDisc_.lsGradQR_!.wxFinal1_[face];
                     wy_neighborToElem = this.spatialDisc_.lsGradQR_!.wyFinal1_[face];
+                    faceWeightElem = this.spatialDisc_.weights2_[face];
+                    faceWeightNeighbor = this.spatialDisc_.weights1_[face];
+                }
+
+                if elem == 12 || elem == 13 {
+                    writeln("face ", face, " elem1 ", elem1, " elem2 ", elem2);
+                    writeln("   sumWx_elem ", sumWx_elem, " sumWy_elem ", sumWy_elem);
+                    writeln("   wx_elemToNeighbor ", wx_elemToNeighbor, " wy_elemToNeighbor ", wy_elemToNeighbor);
+                    writeln("   wx_neighborToElem ", wx_neighborToElem, " wy_neighborToElem ", wy_neighborToElem);
                 }
                 
                 // Check if this is a boundary face (neighbor is ghost cell)
@@ -507,10 +520,10 @@ class temporalDiscretization {
                     
                     // === DIAGONAL CONTRIBUTION ===
                     // From d(0.5*(gradPhi_elem · m))/d(phi_elem) = 0.5 * (-sumW_elem · m)
-                    var face_diag = 0.5 * (-sumWx_elem * mx - sumWy_elem * my);
+                    var face_diag = faceWeightElem * (-sumWx_elem * mx - sumWy_elem * my);
                     
                     // From d(0.5*(gradPhi_neighbor · m))/d(phi_elem) = 0.5 * (w_neighborToElem · m)
-                    face_diag += 0.5 * (wx_neighborToElem * mx + wy_neighborToElem * my);
+                    face_diag += faceWeightElem * (wx_neighborToElem * mx + wy_neighborToElem * my);
                     
                     // Apply sign and area to gradient terms
                     const gradContrib = sign * face_diag * area * rhoFace;
@@ -526,12 +539,17 @@ class temporalDiscretization {
                     // === OFF-DIAGONAL CONTRIBUTION ===
                     const sumWx_neighbor = this.spatialDisc_.lsGradQR_!.sumWx_[neighbor];
                     const sumWy_neighbor = this.spatialDisc_.lsGradQR_!.sumWy_[neighbor];
+
+                    if elem == 12 || elem == 13 {
+                        writeln("  sumWx_neighbor ", sumWx_neighbor);
+                        writeln("  sumWy_neighbor ", sumWy_neighbor);
+                    }
                     
                     // From d(0.5*(gradPhi_elem · m))/d(phi_neighbor) = 0.5 * (w_elemToNeighbor · m)
-                    var offdiag = 0.5 * (wx_elemToNeighbor * mx + wy_elemToNeighbor * my);
+                    var offdiag = faceWeightNeighbor * (wx_elemToNeighbor * mx + wy_elemToNeighbor * my);
                     
                     // From d(0.5*(gradPhi_neighbor · m))/d(phi_neighbor) = 0.5 * (-sumW_neighbor · m)
-                    offdiag += 0.5 * (-sumWx_neighbor * mx - sumWy_neighbor * my);
+                    offdiag += faceWeightNeighbor * (-sumWx_neighbor * mx - sumWy_neighbor * my);
                     
                     // Apply sign and area to gradient terms
                     offdiag *= sign * area * rhoFace;
@@ -1320,6 +1338,10 @@ class temporalDiscretization {
             
             res_prev = res;
             normalized_res = res / this.first_res_;
+
+            if normalized_res < this.inputs_.FREEZE_MU_TOL_ {
+                this.spatialDisc_.FREEZE_MU_ = true;
+            }
 
             const res_wall = RMSE(this.spatialDisc_.res_[this.spatialDisc_.wall_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.wall_dom]);
             const res_farfield = RMSE(this.spatialDisc_.res_[this.spatialDisc_.farfield_dom], this.spatialDisc_.elemVolume_[this.spatialDisc_.farfield_dom]);

@@ -512,6 +512,8 @@ def main():
     
     # Option to add wake line from trailing edge to farfield
     add_wake = False
+
+    r_outer = 1
     
     # Check which input files exist
     available_inputs = []
@@ -532,16 +534,16 @@ def main():
     
     for N, input_file in available_inputs:
         if add_wake:
-            output_file = f"naca0012_triangle_{N}x{N}_wake.cgns"
+            output_file = f"naca0012_triangle_{N}x{N}_r{str(r_outer).replace('.', '-')}_wake.cgns"
         else:
-            output_file = f"naca0012_triangle_{N}x{N}.cgns"
+            output_file = f"naca0012_triangle_{N}x{N}_r{str(r_outer).replace('.', '-')}.cgns"
         print(f"\nProcessing {input_file}:")
         
         try:
             generate_triangle_mesh_from_cgns(
                 input_cgns=input_file,
                 output_cgns=output_file,
-                r_outer=100.0,
+                r_outer=r_outer,
                 target_growth_rate=1.2,
                 add_wake=add_wake
             )

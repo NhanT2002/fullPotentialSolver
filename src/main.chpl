@@ -76,6 +76,7 @@ proc main() {
             // Standard single-Mach solve
             var Mesh = new shared MeshData(inputs.GRID_FILENAME_, inputs.ELEMENT_TYPE_);
             Mesh.buildConnectivity();
+            writeln("Mesh loaded: ", Mesh.nelem_, " elements");
             if inputs.FLOW_ == "steady" {
                 var spatialDisc = new shared spatialDiscretization(Mesh, inputs);
                 var steadySolver = new shared temporalDiscretization(spatialDisc, inputs);

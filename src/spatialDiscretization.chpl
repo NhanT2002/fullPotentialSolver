@@ -65,6 +65,8 @@ class spatialDiscretization {
     var faceArea_: [face_dom] real(64);
     var faceNormalX_: [face_dom] real(64);
     var faceNormalY_: [face_dom] real(64);
+    var weights1_: [face_dom] real(64);
+    var weights2_: [face_dom] real(64);
     var uFace_: [face_dom] real(64);
     var vFace_: [face_dom] real(64);
     var rhoFace_: [face_dom] real(64);
@@ -109,6 +111,8 @@ class spatialDiscretization {
     var wake_dom: sparse subdomain(elemDomain_dom); // cells next to wake
     var shock_dom: sparse subdomain(elemDomain_dom); // cells next to shock
     var wallFaceSet_: set(int);  // Set of wall face indices for efficient lookup
+
+    var FREEZE_MU_: bool = false;
 
     proc init(Mesh: shared MeshData, ref inputs: potentialInputs) {
         this.mesh_ = Mesh;
@@ -279,6 +283,32 @@ class spatialDiscretization {
             
             this.faceNormalX_[face] = nx;
             this.faceNormalY_[face] = ny;
+        }
+
+        // compute weigts for flux average gradient
+        forall face in 1..this.nface_ {
+            const elem1 = this.mesh_.edge2elem_[1, face];
+            const elem2 = this.mesh_.edge2elem_[2, face];
+
+            const faceCx = this.faceCentroidX_[face];
+            const faceCy = this.faceCentroidY_[face];
+            const elem1Cx = this.elemCentroidX_[elem1];
+            const elem1Cy = this.elemCentroidY_[elem1];
+            const elem2Cx = this.elemCentroidX_[elem2];
+            const elem2Cy = this.elemCentroidY_[elem2];
+
+            const distElem1X = faceCx - elem1Cx;
+            const distElem1Y = faceCy - elem1Cy;
+            const distElem2X = faceCx - elem2Cx;
+            const distElem2Y = faceCy - elem2Cy;
+            const distElem1 = sqrt(distElem1X * distElem1X + distElem1Y * distElem1Y);
+            const distElem2 = sqrt(distElem2X * distElem2X + distElem2Y * distElem2Y);
+
+            const weight1 = distElem2 / (distElem1 + distElem2);
+            const weight2 = distElem1 / (distElem1 + distElem2);
+
+            this.weights1_[face] = weight1;
+            this.weights2_[face] = weight2;
         }
 
         // Precompute flux coefficients (depends on mesh geometry only)
@@ -618,13 +648,31 @@ class spatialDiscretization {
                                  (1.0 - this.uu_[elem] * this.uu_[elem] - this.vv_[elem] * this.vv_[elem])) ** this.one_over_gamma_minus_one_;
             this.machmach_[elem] = this.mach(this.uu_[elem], this.vv_[elem], this.rhorho_[elem]);
             
-            // Linear switching function:
-            // μ = μ_C * max(0, M² - M_C²)
-            // Properties: μ = 0 for M ≤ M_C, μ grows unboundedly with M² (sharper shock)
-            const M2 = this.machmach_[elem] * this.machmach_[elem];
-            const Mc2 = this.inputs_.MACH_C_ * this.inputs_.MACH_C_;
-            this.mumu_[elem] = this.inputs_.MU_C_ * max(0.0, M2 - Mc2);
+            if this.FREEZE_MU_ == false {
+                // Linear switching function:
+                // μ = μ_C * max(0, M² - M_C²)
+                // Properties: μ = 0 for M ≤ M_C, μ grows unboundedly with M² (sharper shock)
+                const M2 = this.machmach_[elem] * this.machmach_[elem];
+                const Mc2 = this.inputs_.MACH_C_ * this.inputs_.MACH_C_;
+                this.mumu_[elem] = this.inputs_.MU_C_ * max(0.0, M2 - Mc2);
+            }
         }
+
+        // forall elem in 1..this.nelemDomain_ {
+        //     const neighbors = this.mesh_.esuel_[this.mesh_.esuelIndex_[elem] + 1 .. this.mesh_.esuelIndex_[elem + 1]];
+        //     var maxMu = this.mumu_[elem];
+        //     for neighbor in neighbors {
+        //         maxMu = max(maxMu, this.mumu_[neighbor]);
+        //     }
+        //     this.mumu_[elem] = maxMu;
+
+        //     // var avgMu = this.mumu_[elem];
+        //     // for neighbor in neighbors {
+        //     //     avgMu += this.mumu_[neighbor];
+        //     // }
+        //     // avgMu /= (1 + neighbors.size);
+        //     // this.mumu_[elem] = avgMu;
+        // }
 
         forall face in this.mesh_.edgeWall_ {
             const elem1 = this.mesh_.edge2elem_[1, face];
@@ -669,12 +717,15 @@ class spatialDiscretization {
         //   - dφ/dl = (φ2 - φ1) * invL_IJ (direct phi difference)
         //   - corrCoeff = n / (n · t_IJ) (precomputed)
         
-        forall face in 1..this.nface_ {
+        for face in 1..this.nface_ {
             const elem1 = this.mesh_.edge2elem_[1, face];
             const elem2 = this.mesh_.edge2elem_[2, face];
+
+            const weight1 = this.weights1_[face];
+            const weight2 = this.weights2_[face];
             
-            const uAvg = 0.5 * (this.uu_[elem1] + this.uu_[elem2]);
-            const vAvg = 0.5 * (this.vv_[elem1] + this.vv_[elem2]);
+            const uAvg = weight1 * this.uu_[elem1] + weight2 * this.uu_[elem2];
+            const vAvg = weight1 * this.vv_[elem1] + weight2 * this.vv_[elem2];
 
             // Get phi values with potential jump across wake
             var phi1 = this.phi_[elem1];
@@ -724,6 +775,16 @@ class spatialDiscretization {
             this.vFace_[face] = vFace;
             this.rhoFace_[face] = rhoFace;
             this.rhoIsenFace_[face] = rhoFace; // Store isentropic density for later use
+
+            if elem1 == 1 {
+                writeln("Face ", face, ": u = ", uFace, ", v = ", vFace, ", rho = ", rhoFace);
+                writeln("  Elem1: ", elem1, " (phi=", phi1, ", kuttaType=", this.kuttaCell_[elem1], ")");
+                writeln("  Elem2: ", elem2, " (phi=", phi2, ", kuttaType=", this.kuttaCell_[elem2], ")");
+                writeln("  dPhidl = ", dPhidl, ", vDotT = ", vDotT, ", delta = ", delta);
+                writeln("  uAvg = ", uAvg, ", vAvg = ", vAvg);
+                writeln("  uElem1 = ", this.uu_[elem1], ", vElem1 = ", this.vv_[elem1]);
+                writeln("  uElem2 = ", this.uu_[elem2], ", vElem2 = ", this.vv_[elem2]);
+            }
         }
     }
 
@@ -772,6 +833,7 @@ class spatialDiscretization {
             
             // Get isentropic and upwind densities
             // Simplified: no gradient extrapolation for Jacobian consistency
+            // this.rhoFace_[face] = this.rhoNonIsentropic(this.rhoFace_[face], this.machmach_[upwindElem]);
             const rhoIsentropic = this.rhoFace_[face];
             const rhoUpwind = this.rhorho_[upwindElem];
             
@@ -825,6 +887,25 @@ class spatialDiscretization {
             const phi_lower = this.phi_[this.lowerTEelem_] + (this.uu_[this.lowerTEelem_] * this.deltaSlowerTEx_ + this.vv_[this.lowerTEelem_] * this.deltaSlowerTEy_);
             const gamma_computed = phi_upper - phi_lower;
             this.kutta_res_ = (this.circulation_ - gamma_computed) * this.res_scale_;
+        }
+
+        for face in this.mesh_.edgeWall_ {
+            const elem1 = this.mesh_.edge2elem_[1, face];
+            const elem2 = this.mesh_.edge2elem_[2, face];
+            // Determine which element is interior
+            const (interiorElem, ghostElem) = 
+                if elem1 <= this.nelemDomain_ then (elem1, elem2) else (elem2, elem1);
+            
+            // print residual info for wall faces
+            writeln("Wall face ", face, " between elem ", interiorElem, " and ghost elem ", ghostElem, " flux: ", this.flux_[face]);
+            writeln("    interior elem res: ", this.res_[interiorElem] / this.res_scale_);
+            const facesElem1 = this.mesh_.elem2edge_[this.mesh_.elem2edgeIndex_[interiorElem] + 1 .. this.mesh_.elem2edgeIndex_[interiorElem + 1]];
+            for face in facesElem1 {
+                const uFace = this.uFace_[face];
+                const vFace = this.vFace_[face];
+                const rhoFace = this.rhoFace_[face];
+                writeln("        face ", face, " u_face: ", uFace, " v_face: ", vFace, " rho_face: ", rhoFace, " flux: ", this.flux_[face]);
+            }
         }
     }
 
@@ -895,6 +976,12 @@ class spatialDiscretization {
 
     proc mach(u: real(64), v: real(64), rho: real(64)): real(64) {
         return this.inputs_.MACH_ * sqrt(u**2 + v**2) * rho**this.one_minus_gamma_over_two_;
+    }
+
+    proc rhoNonIsentropic(rhoIsen : real(64), machUpstream : real(64)) {
+        const ds_R = 1 / (this.inputs_.GAMMA_ - 1.0) * ln((2*this.inputs_.GAMMA_ * machUpstream**2 - (this.inputs_.GAMMA_ - 1.0)) / (this.inputs_.GAMMA_ + 1.0))
+            - this.inputs_.GAMMA_ / (this.inputs_.GAMMA_ - 1.0) * ln((this.inputs_.GAMMA_ + 1.0) * machUpstream**2 / ((this.inputs_.GAMMA_ - 1.0) * machUpstream**2 + 2.0));
+        return rhoIsen * exp(-ds_R);
     }
 
     proc cylinder_solution(x: [] real(64), y: [] real(64)) {
@@ -1056,7 +1143,7 @@ class spatialDiscretization {
             vWall[i] = this.vFace_[face];
             rhoWall[i] = this.rhoFace_[face];
             pWall[i] = (this.rhoFace_[face]**this.inputs_.GAMMA_ / (this.inputs_.GAMMA_ * this.inputs_.MACH_ * this.inputs_.MACH_ * this.inputs_.P_INF_) - 1 ) / (this.inputs_.GAMMA_/2*this.inputs_.MACH_**2);
-            machWall[i] = this.mach(this.uu_[interiorElem], this.vv_[interiorElem], this.rhorho_[interiorElem]);
+            machWall[i] = this.mach(this.uFace_[face], this.vFace_[face], this.rhoFace_[face]);
             xWall[i] = this.faceCentroidX_[face];
             yWall[i] = this.faceCentroidY_[face];
             nxWall[i] = this.faceNormalX_[face];
@@ -1241,7 +1328,7 @@ class spatialDiscretization {
             vWall[i] = this.vFace_[face];
             rhoWall[i] = this.rhoFace_[face];
             pWall[i] = (this.rhoFace_[face]**this.inputs_.GAMMA_ / (this.inputs_.GAMMA_ * this.inputs_.MACH_ * this.inputs_.MACH_ * this.inputs_.P_INF_) - 1 ) / (this.inputs_.GAMMA_/2*this.inputs_.MACH_**2);
-            machWall[i] = this.mach(this.uu_[interiorElem], this.vv_[interiorElem], this.rhorho_[interiorElem]);
+            machWall[i] = this.mach(this.uFace_[face], this.vFace_[face], this.rhoFace_[face]);
             xWall[i] = this.faceCentroidX_[face];
             yWall[i] = this.faceCentroidY_[face];
             nxWall[i] = this.faceNormalX_[face];

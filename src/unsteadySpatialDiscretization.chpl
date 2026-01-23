@@ -855,6 +855,14 @@ class unsteadySpatialDiscretization {
         var xElem: [dom] real(64);
         var yElem: [dom] real(64);
         var kuttaCell: [dom] int;
+        var face1_u: [dom] real(64);
+        var face1_v: [dom] real(64);
+        var face2_u: [dom] real(64);
+        var face2_v: [dom] real(64);
+        var face3_u: [dom] real(64);
+        var face3_v: [dom] real(64);
+        var face4_u: [dom] real(64);
+        var face4_v: [dom] real(64);
 
         forall elem in 1..this.nelemDomain_ {
             phi[elem-1] = this.phi_[elem];
@@ -874,6 +882,20 @@ class unsteadySpatialDiscretization {
             xElem[elem-1] = this.elemCentroidX_[elem];
             yElem[elem-1] = this.elemCentroidY_[elem];
             kuttaCell[elem-1] = this.kuttaCell_[elem];
+            const faces = this.mesh_.elem2edge_[this.mesh_.elem2edgeIndex_[elem] + 1 .. this.mesh_.elem2edgeIndex_[elem + 1]];
+            var faceList = new list(int);
+            for face in faces {
+                faceList.pushBack(face);
+            }
+            // Assuming quadrilateral elements
+            face1_u[elem-1] = this.uFace_[faceList[0]];
+            face1_v[elem-1] = this.vFace_[faceList[0]];
+            face2_u[elem-1] = this.uFace_[faceList[1]];
+            face2_v[elem-1] = this.vFace_[faceList[1]];
+            face3_u[elem-1] = this.uFace_[faceList[2]];
+            face3_v[elem-1] = this.vFace_[faceList[2]];
+            face4_u[elem-1] = this.uFace_[faceList[3]];
+            face4_v[elem-1] = this.vFace_[faceList[3]];
         }
 
         forall (i, face) in zip(this.wake_face_dom, this.wakeFace_) {
@@ -904,6 +926,14 @@ class unsteadySpatialDiscretization {
         fields["xElem"] = xElem;
         fields["yElem"] = yElem;
         fields["kuttaCell"] = kuttaCell;
+        fields["face1_u"] = face1_u;
+        fields["face1_v"] = face1_v;
+        fields["face2_u"] = face2_u;
+        fields["face2_v"] = face2_v;
+        fields["face3_u"] = face3_u;
+        fields["face3_v"] = face3_v;
+        fields["face4_u"] = face4_u;
+        fields["face4_v"] = face4_v;
 
         var writer = new owned potentialFlowWriter_c(this.inputs_.OUTPUT_FILENAME_);
 
@@ -1034,6 +1064,14 @@ class unsteadySpatialDiscretization {
         var machmach: [dom] real(64);
         var xElem: [dom] real(64);
         var yElem: [dom] real(64);
+        var face1_u: [dom] real(64);
+        var face1_v: [dom] real(64);
+        var face2_u: [dom] real(64);
+        var face2_v: [dom] real(64);
+        var face3_u: [dom] real(64);
+        var face3_v: [dom] real(64);
+        var face4_u: [dom] real(64);
+        var face4_v: [dom] real(64);
 
         forall elem in 1..this.nelemDomain_ {
             phi[elem-1] = this.phi_[elem];
@@ -1044,6 +1082,20 @@ class unsteadySpatialDiscretization {
             machmach[elem-1] = this.mach(this.uu_[elem], this.vv_[elem], this.rhorho_[elem]);
             xElem[elem-1] = this.elemCentroidX_[elem];
             yElem[elem-1] = this.elemCentroidY_[elem];
+            const faces = this.mesh_.elem2edge_[this.mesh_.elem2edgeIndex_[elem] + 1 .. this.mesh_.elem2edgeIndex_[elem + 1]];
+            var faceList = new list(int);
+            for face in faces {
+                faceList.pushBack(face);
+            }
+            // Assuming quadrilateral elements
+            face1_u[elem-1] = this.uFace_[faceList[0]];
+            face1_v[elem-1] = this.vFace_[faceList[0]];
+            face2_u[elem-1] = this.uFace_[faceList[1]];
+            face2_v[elem-1] = this.vFace_[faceList[1]];
+            face3_u[elem-1] = this.uFace_[faceList[2]];
+            face3_v[elem-1] = this.vFace_[faceList[2]];
+            face4_u[elem-1] = this.uFace_[faceList[3]];
+            face4_v[elem-1] = this.vFace_[faceList[3]];
         }
 
         var fields = new map(string, [dom] real(64));
@@ -1056,6 +1108,14 @@ class unsteadySpatialDiscretization {
         fields["mach"] = machmach;
         fields["xElem"] = xElem;
         fields["yElem"] = yElem;
+        fields["face1_u"] = face1_u;
+        fields["face1_v"] = face1_v;
+        fields["face2_u"] = face2_u;
+        fields["face2_v"] = face2_v;
+        fields["face3_u"] = face3_u;
+        fields["face3_v"] = face3_v;
+        fields["face4_u"] = face4_u;
+        fields["face4_v"] = face4_v;
 
         var writer = new owned potentialFlowWriter_c(this.inputs_.OUTPUT_FILENAME_);
 
