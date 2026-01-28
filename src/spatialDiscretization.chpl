@@ -99,11 +99,14 @@ class spatialDiscretization {
     var circulation_ : real(64);
     var wake_face_dom: domain(1) = {1..0};
     var wakeFace_: [wake_face_dom] int;
+    var wakeFaceUpper_: [wake_face_dom] int;
+    var wakeFaceLower_: [wake_face_dom] int;
     var wakeFace2index_: map(int, int);
     var wakeFaceX_: [wake_face_dom] real(64);
     var wakeFaceY_: [wake_face_dom] real(64);
     var wakeFaceZ_: [wake_face_dom] real(64);
     var wakeFaceGamma_: [wake_face_dom] real(64);
+    var wakeFaceIndexInfluenceOnElem_: [elem_dom] int;
 
     var wall_dom: sparse subdomain(elemDomain_dom); // cell next to wall boundary
     var farfield_dom: sparse subdomain(elemDomain_dom); // cell next to farfield boundary
@@ -202,7 +205,7 @@ class spatialDiscretization {
         }
 
         const min_volume = min reduce this.elemVolume_[1..this.nelemDomain_];
-        this.res_scale_ = 1.0 / min_volume; // Used for scaling residuals
+        this.res_scale_ = 1.0 / 1; // Used for scaling residuals
 
         // Compute ghost cell centroids by mirroring across boundary faces
         inline proc computeGhostCentroid(face: int) {
@@ -378,7 +381,7 @@ class spatialDiscretization {
         writeln("T.E. node: ", this.TEnode_, " at (", this.TEnodeXcoord_, ", ", this.TEnodeYcoord_, ")");
         writeln("Upper T.E. face: ", this.upperTEface_, " elem: ", this.upperTEelem_);
         writeln("Lower T.E. face: ", this.lowerTEface_, " elem: ", this.lowerTEelem_);
-        this.kuttaCell_ = 9;
+        this.kuttaCell_ = 0;
         // Define wake line between (x3, y3) and a far downstream point
         const x3 = this.TEnodeXcoord_;
         const y3 = this.TEnodeYcoord_;
@@ -388,7 +391,7 @@ class spatialDiscretization {
             const x = this.elemCentroidX_[elem];
             const y = this.elemCentroidY_[elem];
             if x <= this.TEnodeXcoord_ {
-                this.kuttaCell_[elem] = 9;
+                this.kuttaCell_[elem] = 0;
             }
             else {
                 const signedArea = (x4 - x3)*(y - y3) - (y4 - y3)*(x - x3);
@@ -412,16 +415,98 @@ class spatialDiscretization {
                 wake_face_list.pushBack((this.faceCentroidX_[face], face));
             }
         }
+        this.kuttaCell_ = 0;
         sort(wake_face_list);
         this.wake_face_dom = {1..wake_face_list.size};
         forall i in this.wake_face_dom {
             this.wakeFace_[i] = wake_face_list[i-1][1];
             this.wakeFaceX_[i] = this.faceCentroidX_[this.wakeFace_[i]];
             this.wakeFaceY_[i] = this.faceCentroidY_[this.wakeFace_[i]];
+
+            const elem1 = this.mesh_.edge2elem_[1, this.wakeFace_[i]];
+            const elem2 = this.mesh_.edge2elem_[2, this.wakeFace_[i]];
+            if this.elemCentroidY_[elem1] > this.elemCentroidY_[elem2] {
+                this.kuttaCell_[elem1] = 1;
+                this.kuttaCell_[elem2] = -1;
+                this.wakeFaceUpper_[i] = elem1;
+                this.wakeFaceLower_[i] = elem2;
+            }
+            else {
+                this.kuttaCell_[elem1] = -1;
+                this.kuttaCell_[elem2] = 1;
+                this.wakeFaceUpper_[i] = elem2;
+                this.wakeFaceLower_[i] = elem1;
+            }
         }
         for i in this.wake_face_dom {
             this.wakeFace2index_[this.wakeFace_[i]] = i;
         }
+
+        this.wakeFaceIndexInfluenceOnElem_ = -1;
+        for (i, face) in zip(this.wakeFace_.domain, this.wakeFace_) {
+            if i == 1 {
+                const elemUpper = this.wakeFaceUpper_[i];
+                const elemLower = this.wakeFaceLower_[i];
+                this.wakeFaceIndexInfluenceOnElem_[elemUpper] = i;
+                this.wakeFaceIndexInfluenceOnElem_[elemLower] = i;
+
+                const neighborFacesUpper = this.mesh_.elem2edge_[this.mesh_.elem2edgeIndex_[elemUpper]+1 .. this.mesh_.elem2edgeIndex_[elemUpper+1]];
+                for faceNeighbor in neighborFacesUpper {
+                    const elem1 = this.mesh_.edge2elem_[1, faceNeighbor];
+                    const elem2 = this.mesh_.edge2elem_[2, faceNeighbor];
+                    const neighborElem = if elem1 == elemUpper then elem2 else elem1;
+                    if this.kuttaCell_[neighborElem] == 0 {
+                        this.wakeFaceIndexInfluenceOnElem_[neighborElem] = i;
+                    }
+                }
+
+                const neighborFacesLower = this.mesh_.elem2edge_[this.mesh_.elem2edgeIndex_[elemLower]+1 .. this.mesh_.elem2edgeIndex_[elemLower+1]];
+                for faceNeighbor in neighborFacesLower {
+                    const elem1 = this.mesh_.edge2elem_[1, faceNeighbor];
+                    const elem2 = this.mesh_.edge2elem_[2, faceNeighbor];
+                    const neighborElem = if elem1 == elemLower then elem2 else elem1;
+                    if this.kuttaCell_[neighborElem] == 0 {
+                        this.wakeFaceIndexInfluenceOnElem_[neighborElem] = i;
+                    }
+                }
+            }
+            else {
+                const elemUpper = this.wakeFaceUpper_[i];
+                const elemLower = this.wakeFaceLower_[i];
+                this.wakeFaceIndexInfluenceOnElem_[elemUpper] = i-1;
+                this.wakeFaceIndexInfluenceOnElem_[elemLower] = i-1;
+
+                const neighborFacesUpper = this.mesh_.elem2edge_[this.mesh_.elem2edgeIndex_[elemUpper]+1 .. this.mesh_.elem2edgeIndex_[elemUpper+1]];
+                for faceNeighbor in neighborFacesUpper {
+                    const elem1 = this.mesh_.edge2elem_[1, faceNeighbor];
+                    const elem2 = this.mesh_.edge2elem_[2, faceNeighbor];
+                    const neighborElem = if elem1 == elemUpper then elem2 else elem1;
+                    if this.kuttaCell_[neighborElem] == 0 {
+                        this.wakeFaceIndexInfluenceOnElem_[neighborElem] = i-1;
+                    }
+                }
+
+                const neighborFacesLower = this.mesh_.elem2edge_[this.mesh_.elem2edgeIndex_[elemLower]+1 .. this.mesh_.elem2edgeIndex_[elemLower+1]];
+                for faceNeighbor in neighborFacesLower {
+                    const elem1 = this.mesh_.edge2elem_[1, faceNeighbor];
+                    const elem2 = this.mesh_.edge2elem_[2, faceNeighbor];
+                    const neighborElem = if elem1 == elemLower then elem2 else elem1;
+                    if this.kuttaCell_[neighborElem] == 0 {
+                        this.wakeFaceIndexInfluenceOnElem_[neighborElem] = i-1;
+                    }
+                }
+            }
+        }
+
+        // for elem in 1..this.nelemDomain_ {
+        //     if this.wakeFaceIndexInfluenceOnElem_[elem] != -1 {
+        //         const faceIndex = this.wakeFaceIndexInfluenceOnElem_[elem];
+        //         const upperElem = this.wakeFaceUpper_[faceIndex];
+        //         const lowerElem = this.wakeFaceLower_[faceIndex];
+        //         writeln("Elem ", elem, " influenced by wake face ", faceIndex, 
+        //                 " between elems ", upperElem, " and ", lowerElem);
+        //     }
+        // }
         
 
         this.deltaSupperTEx_ = this.TEnodeXcoord_ - this.elemCentroidX_[this.upperTEelem_];
@@ -775,16 +860,6 @@ class spatialDiscretization {
             this.vFace_[face] = vFace;
             this.rhoFace_[face] = rhoFace;
             this.rhoIsenFace_[face] = rhoFace; // Store isentropic density for later use
-
-            if elem1 == 1 {
-                writeln("Face ", face, ": u = ", uFace, ", v = ", vFace, ", rho = ", rhoFace);
-                writeln("  Elem1: ", elem1, " (phi=", phi1, ", kuttaType=", this.kuttaCell_[elem1], ")");
-                writeln("  Elem2: ", elem2, " (phi=", phi2, ", kuttaType=", this.kuttaCell_[elem2], ")");
-                writeln("  dPhidl = ", dPhidl, ", vDotT = ", vDotT, ", delta = ", delta);
-                writeln("  uAvg = ", uAvg, ", vAvg = ", vAvg);
-                writeln("  uElem1 = ", this.uu_[elem1], ", vElem1 = ", this.vv_[elem1]);
-                writeln("  uElem2 = ", this.uu_[elem2], ", vElem2 = ", this.vv_[elem2]);
-            }
         }
     }
 
@@ -887,25 +962,6 @@ class spatialDiscretization {
             const phi_lower = this.phi_[this.lowerTEelem_] + (this.uu_[this.lowerTEelem_] * this.deltaSlowerTEx_ + this.vv_[this.lowerTEelem_] * this.deltaSlowerTEy_);
             const gamma_computed = phi_upper - phi_lower;
             this.kutta_res_ = (this.circulation_ - gamma_computed) * this.res_scale_;
-        }
-
-        for face in this.mesh_.edgeWall_ {
-            const elem1 = this.mesh_.edge2elem_[1, face];
-            const elem2 = this.mesh_.edge2elem_[2, face];
-            // Determine which element is interior
-            const (interiorElem, ghostElem) = 
-                if elem1 <= this.nelemDomain_ then (elem1, elem2) else (elem2, elem1);
-            
-            // print residual info for wall faces
-            writeln("Wall face ", face, " between elem ", interiorElem, " and ghost elem ", ghostElem, " flux: ", this.flux_[face]);
-            writeln("    interior elem res: ", this.res_[interiorElem] / this.res_scale_);
-            const facesElem1 = this.mesh_.elem2edge_[this.mesh_.elem2edgeIndex_[interiorElem] + 1 .. this.mesh_.elem2edgeIndex_[interiorElem + 1]];
-            for face in facesElem1 {
-                const uFace = this.uFace_[face];
-                const vFace = this.vFace_[face];
-                const rhoFace = this.rhoFace_[face];
-                writeln("        face ", face, " u_face: ", uFace, " v_face: ", vFace, " rho_face: ", rhoFace, " flux: ", this.flux_[face]);
-            }
         }
     }
 

@@ -91,6 +91,68 @@ proc readMesh(filename: string, elementType: string) {
     return (X, Y, Z, element2node, wallElement2node, farfieldElement2node);
 }
 
+// proc readMesh(filename: string, elementType: string) {
+//     // === Dataset paths ===
+//     const dsetX = "/Base/Zone00001_step0/GridCoordinates/CoordinateX/ data";
+//     const dsetY = "/Base/Zone00001_step0/GridCoordinates/CoordinateY/ data";
+//     const dsetZ = "/Base/Zone00001_step0/GridCoordinates/CoordinateZ/ data";
+
+//     const dsetElem     = "/Base/Zone00001_step0/" + "Elements" + "/ElementConnectivity/ data";
+//     const dsetFarfield = "/Base/Zone00001_step0/farfield/ElementConnectivity/ data";
+//     const dsetWall     = "/Base/Zone00001_step0/wall/ElementConnectivity/ data";
+
+//     var file_id = H5Fopen(filename.c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
+//     if file_id < 0 then
+//         halt("Could not open file: ", filename);
+
+//     // Read 1D coordinate arrays (type: real(64))
+//     var X = read1DDataset(real(64), file_id, dsetX);
+//     var Y = read1DDataset(real(64), file_id, dsetY);
+//     var Z = read1DDataset(real(64), file_id, dsetZ);
+
+//     // Read connectivity arrays
+//     var element2node = read1DDataset(int, file_id, dsetElem);
+//     var farfieldElement2node = read1DDataset(int, file_id, dsetFarfield);
+//     var wallElement2node = read1DDataset(int, file_id, dsetWall);
+
+//     var element2nodeList = new list(int);
+//     var farfieldElement2nodeList = new list(int);
+//     var wallElement2nodeList = new list(int);
+//     if elementType == "QuadElements" {
+//         for (i, node) in zip(element2node.domain, element2node) {
+//             if (i-1) % 5 != 0 {
+//                 element2nodeList.pushBack(node);
+//             }
+//         }
+//         for (i, node) in zip(farfieldElement2node.domain, farfieldElement2node) {
+//             if (i-1) % 3 != 0 {
+//                 farfieldElement2nodeList.pushBack(node);
+//             }
+//         }
+//         for (i, node) in zip(wallElement2node.domain, wallElement2node) {
+//             if (i-1) % 3 != 0 {
+//                 wallElement2nodeList.pushBack(node);
+//             }
+//         }
+//     }
+//     var newElment2node: [1..element2nodeList.size] int;
+//     var newFarfieldElement2node: [1..farfieldElement2nodeList.size] int;
+//     var newWallElement2node: [1..wallElement2nodeList.size] int;
+//     for (i, node) in zip(newElment2node.domain, element2nodeList) {
+//         newElment2node[i] = node;
+//     }
+//     for (i, node) in zip(newFarfieldElement2node.domain, farfieldElement2nodeList) {
+//         newFarfieldElement2node[i] = node;
+//     }
+//     for (i, node) in zip(newWallElement2node.domain, wallElement2nodeList) {
+//         newWallElement2node[i] = node;
+//     }
+
+//     H5Fclose(file_id);
+
+//     return (X, Y, Z, newElment2node, newWallElement2node, newFarfieldElement2node);
+// }
+
 class MeshData {
     var elementType_: string;
     // === Connectivity ===

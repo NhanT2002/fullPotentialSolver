@@ -253,9 +253,9 @@ def make_gif_from_cp(x_list, cp_list, res_list, gif_name, duration=100):
 #             duration=100)
 
 
-data = readCGNS("../output/output_345.cgns")
-data2 = readCGNS("../output/output_346.cgns")
-data3 = readCGNS("../output/output_347.cgns")
+data = readCGNS("../output/output_484.cgns")
+data2 = readCGNS("../output/output_451.cgns")
+data3 = readCGNS("../output/output_472.cgns")
 
 data_hspm = readHSPM("../output/HSPM_naca0012_A1-25.dat")
 

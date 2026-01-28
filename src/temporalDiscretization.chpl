@@ -14,6 +14,7 @@ use CTypes;
 use List;
 use gmres;
 use Sort;
+use IO;
 
 // ============================================================================
 // Jacobian-Vector Product Provider for Matrix-Free Newton-Krylov
@@ -193,10 +194,9 @@ class temporalDiscretization {
         writeln("Initializing temporal discretization...");
         this.spatialDisc_ = spatialDisc;
         this.inputs_ = inputs;
-
-        // Add 1 extra DOF for circulation Γ
-        const M = spatialDisc.nelemDomain_ + 1;
-        const N = spatialDisc.nelemDomain_ + 1;
+        
+        const M = spatialDisc.nelemDomain_;
+        const N = spatialDisc.nelemDomain_;
         this.gammaIndex_ = spatialDisc.nelemDomain_;  // 0-based index for Γ
         
         this.A_petsc = new owned PETSCmatrix_c(PETSC_COMM_SELF, "seqaij", M, M, N, N);
@@ -305,6 +305,7 @@ class temporalDiscretization {
         forall elem in 1..this.spatialDisc_.nelemDomain_ {
             this.A_petsc.set(elem-1, elem-1, 0.0);
             const faces = this.spatialDisc_.mesh_.elem2edge_[this.spatialDisc_.mesh_.elem2edgeIndex_[elem] + 1 .. this.spatialDisc_.mesh_.elem2edgeIndex_[elem + 1]];
+            var isWakeFace = false;
             for face in faces {
                 const elem1 = this.spatialDisc_.mesh_.edge2elem_[1, face];
                 const elem2 = this.spatialDisc_.mesh_.edge2elem_[2, face];
@@ -312,18 +313,30 @@ class temporalDiscretization {
                 if neighbor <= this.spatialDisc_.nelemDomain_ {
                     this.A_petsc.set(elem-1, neighbor-1, 0.0);
                 }
+                if this.dgradX_dGamma_[elem] != 0.0 || this.dgradY_dGamma_[elem] != 0.0
+                || this.dgradX_dGamma_[neighbor] != 0.0 || this.dgradY_dGamma_[neighbor] != 0.0 {
+                    isWakeFace = true;
+                }
             }
             // Initialize dRes_i/dΓ column entries for wake-adjacent cells
-            this.A_petsc.set(elem-1, this.gammaIndex_, 0.0);
+            // this.A_petsc.set(elem-1, this.gammaIndex_, 0.0);
+            if isWakeFace {
+                const wakeFaceIndex = this.spatialDisc_.wakeFaceIndexInfluenceOnElem_[elem];
+                const upperTE_influences = this.spatialDisc_.wakeFaceUpper_[wakeFaceIndex];
+                const lowerTE_influences = this.spatialDisc_.wakeFaceLower_[wakeFaceIndex];
+
+                this.A_petsc.set(elem-1, upperTE_influences - 1, 0.0);
+                this.A_petsc.set(elem-1, lowerTE_influences - 1, 0.0);
+            }            
         }
         
-        // Initialize Γ row (Kutta condition): Γ - (φ_upper - φ_lower) = 0
-        // dKutta/dΓ = 1
-        this.A_petsc.set(this.gammaIndex_, this.gammaIndex_, 0.0);
-        // dKutta/dφ_upperTE = -1
-        this.A_petsc.set(this.gammaIndex_, this.spatialDisc_.upperTEelem_ - 1, 0.0);
-        // dKutta/dφ_lowerTE = +1
-        this.A_petsc.set(this.gammaIndex_, this.spatialDisc_.lowerTEelem_ - 1, 0.0);
+        // // Initialize Γ row (Kutta condition): Γ - (φ_upper - φ_lower) = 0
+        // // dKutta/dΓ = 1
+        // this.A_petsc.set(this.gammaIndex_, this.gammaIndex_, 0.0);
+        // // dKutta/dφ_upperTE = -1
+        // this.A_petsc.set(this.gammaIndex_, this.spatialDisc_.upperTEelem_ - 1, 0.0);
+        // // dKutta/dφ_lowerTE = +1
+        // this.A_petsc.set(this.gammaIndex_, this.spatialDisc_.lowerTEelem_ - 1, 0.0);
 
         this.A_petsc.assemblyComplete();
         // this.A_petsc.matView();
@@ -495,13 +508,6 @@ class temporalDiscretization {
                     faceWeightNeighbor = this.spatialDisc_.weights1_[face];
                 }
 
-                if elem == 12 || elem == 13 {
-                    writeln("face ", face, " elem1 ", elem1, " elem2 ", elem2);
-                    writeln("   sumWx_elem ", sumWx_elem, " sumWy_elem ", sumWy_elem);
-                    writeln("   wx_elemToNeighbor ", wx_elemToNeighbor, " wy_elemToNeighbor ", wy_elemToNeighbor);
-                    writeln("   wx_neighborToElem ", wx_neighborToElem, " wy_neighborToElem ", wy_neighborToElem);
-                }
-                
                 // Check if this is a boundary face (neighbor is ghost cell)
                 const isInteriorFace = neighbor <= this.spatialDisc_.nelemDomain_;
                 const isWallFace = this.spatialDisc_.wallFaceSet_.contains(face);
@@ -523,7 +529,7 @@ class temporalDiscretization {
                     var face_diag = faceWeightElem * (-sumWx_elem * mx - sumWy_elem * my);
                     
                     // From d(0.5*(gradPhi_neighbor · m))/d(phi_elem) = 0.5 * (w_neighborToElem · m)
-                    face_diag += faceWeightElem * (wx_neighborToElem * mx + wy_neighborToElem * my);
+                    face_diag += faceWeightNeighbor * (wx_neighborToElem * mx + wy_neighborToElem * my);
                     
                     // Apply sign and area to gradient terms
                     const gradContrib = sign * face_diag * area * rhoFace;
@@ -539,14 +545,9 @@ class temporalDiscretization {
                     // === OFF-DIAGONAL CONTRIBUTION ===
                     const sumWx_neighbor = this.spatialDisc_.lsGradQR_!.sumWx_[neighbor];
                     const sumWy_neighbor = this.spatialDisc_.lsGradQR_!.sumWy_[neighbor];
-
-                    if elem == 12 || elem == 13 {
-                        writeln("  sumWx_neighbor ", sumWx_neighbor);
-                        writeln("  sumWy_neighbor ", sumWy_neighbor);
-                    }
                     
                     // From d(0.5*(gradPhi_elem · m))/d(phi_neighbor) = 0.5 * (w_elemToNeighbor · m)
-                    var offdiag = faceWeightNeighbor * (wx_elemToNeighbor * mx + wy_elemToNeighbor * my);
+                    var offdiag = faceWeightElem * (wx_elemToNeighbor * mx + wy_elemToNeighbor * my);
                     
                     // From d(0.5*(gradPhi_neighbor · m))/d(phi_neighbor) = 0.5 * (-sumW_neighbor · m)
                     offdiag += faceWeightNeighbor * (-sumWx_neighbor * mx - sumWy_neighbor * my);
@@ -662,15 +663,22 @@ class temporalDiscretization {
                     // Contribution from elem's gradient sensitivity
                     const dgradX_elem = this.dgradX_dGamma_[elem];
                     const dgradY_elem = this.dgradY_dGamma_[elem];
-                    var dFlux_dGamma = 0.5 * (dgradX_elem * mx + dgradY_elem * my);
+                    var dFlux_dGamma = faceWeightElem * (dgradX_elem * mx + dgradY_elem * my);
 
                     // Contribution from neighbor's gradient sensitivity
                     const dgradX_neighbor = this.dgradX_dGamma_[neighbor];
                     const dgradY_neighbor = this.dgradY_dGamma_[neighbor];
-                    dFlux_dGamma += 0.5 * (dgradX_neighbor * mx + dgradY_neighbor * my);
+                    dFlux_dGamma += faceWeightNeighbor * (dgradX_neighbor * mx + dgradY_neighbor * my);
 
                     // Apply sign and area
                     dFlux_dGamma *= sign * area * rhoFace;
+
+                    // if elem == 1 {
+                    //     writeln("Face ", face, " elem1 ", elem1, " elem2 ", elem2);
+                    //     writeln("  dgrad_elem: (", dgradX_elem, ", ", dgradY_elem, ")");
+                    //     writeln("  dgrad_neighbor: (", dgradX_neighbor, ", ", dgradY_neighbor, ")");
+                    //     writeln("  dFlux_dGamma (before direct): ", dFlux_dGamma);
+                    // }
 
                     // Direct term: only for wake-crossing faces
                     // directCoeff * ((φ_neighbor ± Γ) - φ_elem)
@@ -684,6 +692,9 @@ class temporalDiscretization {
                         }
                         dFlux_dGamma += directCoeff * area * rhoFace * gammaSgn;
                     }
+                    // if elem == 1 {
+                    //     writeln("  dFlux_dGamma (after direct): ", dFlux_dGamma);
+                    // }
 
                     dRes_dGamma += dFlux_dGamma;
 
@@ -755,6 +766,12 @@ class temporalDiscretization {
                     const dgradX_elem = this.dgradX_dGamma_[elem];
                     const dgradY_elem = this.dgradY_dGamma_[elem];
                     const dFlux_dGamma_wall = (dgradX_elem * mWallX + dgradY_elem * mWallY) * sign * area * rhoFace;
+                    // if elem == 1 {
+                    //     writeln("Wall Face ", face, " elem ", elem);
+                    //     writeln("  dgrad_elem: (", dgradX_elem, ", ", dgradY_elem, ")");
+                    //     writeln("  m_wall: (", mWallX, ", ", mWallY, ")");
+                    //     writeln("  dFlux_dGamma_wall: ", dFlux_dGamma_wall);
+                    // }
                     dRes_dGamma += dFlux_dGamma_wall;
 
                 } else {
@@ -789,13 +806,33 @@ class temporalDiscretization {
             
             // Add diagonal entry
             this.A_petsc.add(elem-1, elem-1, diag * this.spatialDisc_.res_scale_);
+            // We have computed dRes_elem/dΓ
+            // Now we compute dΓ/dphi and add to the appropriate column if needed
+            if dRes_dGamma != 0.0 {
+                const dGamma_dPhi_upper = 1.0; // dΓ/dφ_upperTE
+                const dGamma_dPhi_lower = -1.0; // dΓ/dφ_lowerTE
+                const dRes_dPhi_upper = dRes_dGamma * dGamma_dPhi_upper;
+                const dRes_dPhi_lower = dRes_dGamma * dGamma_dPhi_lower;
+
+                const wakeFaceIndex = this.spatialDisc_.wakeFaceIndexInfluenceOnElem_[elem];
+                const upperTE_influences = this.spatialDisc_.wakeFaceUpper_[wakeFaceIndex];
+                const lowerTE_influences = this.spatialDisc_.wakeFaceLower_[wakeFaceIndex];
+
+                this.A_petsc.add(elem-1, upperTE_influences - 1, dRes_dPhi_upper);
+                this.A_petsc.add(elem-1, lowerTE_influences - 1, dRes_dPhi_lower);
+
+                // writeln("elem ", elem, ": dRes/dGamma = ", dRes_dGamma, 
+                //         " → dRes/dφ_upperTE = ", dRes_dPhi_upper,
+                //         ", dRes/dφ_lowerTE = ", dRes_dPhi_lower);
+            }
+
             // Store diag for possible use in upwinding
             this.Jij_[elem] = diag;
             
-            // Add dRes/dΓ entry (column for circulation)
-            if this.inputs_.FREEZE_CIRCULATION_ == false {
-                this.A_petsc.add(elem-1, this.gammaIndex_, dRes_dGamma * this.spatialDisc_.res_scale_);
-            }
+            // // Add dRes/dΓ entry (column for circulation)
+            // if this.inputs_.FREEZE_CIRCULATION_ == false {
+            //     this.A_petsc.add(elem-1, this.gammaIndex_, dRes_dGamma * this.spatialDisc_.res_scale_);
+            // }
         }
 
         // === BETA-BASED UPWIND AUGMENTATION (element-centric for parallelization) ===
@@ -855,20 +892,20 @@ class temporalDiscretization {
         // d(R_Γ)/dφ_upperTE = -1
         // d(R_Γ)/dφ_lowerTE = +1
         
-        if this.inputs_.FREEZE_CIRCULATION_ == false {
-            // dKutta/dΓ = 1
-            this.A_petsc.add(this.gammaIndex_, this.gammaIndex_, 1.0 * this.spatialDisc_.res_scale_);
+        // if this.inputs_.FREEZE_CIRCULATION_ == false {
+        //     // dKutta/dΓ = 1
+        //     this.A_petsc.add(this.gammaIndex_, this.gammaIndex_, 1.0 * this.spatialDisc_.res_scale_);
             
-            // dKutta/dφ_upperTE1 = -1.0
-            this.A_petsc.add(this.gammaIndex_, this.spatialDisc_.upperTEelem_ - 1, -1.0 * this.spatialDisc_.res_scale_);
-            // dKutta/dφ_lowerTE1 = +1.0
-            this.A_petsc.add(this.gammaIndex_, this.spatialDisc_.lowerTEelem_ - 1, 1.0 * this.spatialDisc_.res_scale_);
-        }
-        else {
-            // If circulation is frozen, set Kutta row to enforce Γ = Γ_old
-            // dKutta/dΓ = 1
-            this.A_petsc.add(this.gammaIndex_, this.gammaIndex_, 1.0 * this.spatialDisc_.res_scale_);
-        }
+        //     // dKutta/dφ_upperTE1 = -1.0
+        //     this.A_petsc.add(this.gammaIndex_, this.spatialDisc_.upperTEelem_ - 1, -1.0 * this.spatialDisc_.res_scale_);
+        //     // dKutta/dφ_lowerTE1 = +1.0
+        //     this.A_petsc.add(this.gammaIndex_, this.spatialDisc_.lowerTEelem_ - 1, 1.0 * this.spatialDisc_.res_scale_);
+        // }
+        // else {
+        //     // If circulation is frozen, set Kutta row to enforce Γ = Γ_old
+        //     // dKutta/dΓ = 1
+        //     this.A_petsc.add(this.gammaIndex_, this.gammaIndex_, 1.0 * this.spatialDisc_.res_scale_);
+        // }
         this.A_petsc.assemblyComplete();
         // this.A_petsc.matView();
         
@@ -999,8 +1036,8 @@ class temporalDiscretization {
         this.spatialDisc_.initializeKuttaCells();
         this.spatialDisc_.initializeSolution();
         this.spatialDisc_.run();
-        this.initializeJacobian();
         this.computeGradientSensitivity();
+        this.initializeJacobian();
         
         // Build CSR sparsity pattern for native GMRES (must be after initializeJacobian)
         if this.inputs_.USE_NATIVE_GMRES_ {
@@ -1156,9 +1193,9 @@ class temporalDiscretization {
             forall elem in 1..this.spatialDisc_.nelemDomain_ {
                 this.b_petsc.set(elem-1, -this.spatialDisc_.res_[elem]);
             }
-            if this.inputs_.FREEZE_CIRCULATION_ == false {
-                this.b_petsc.set(this.gammaIndex_, -this.spatialDisc_.kutta_res_);
-            }
+            // if this.inputs_.FREEZE_CIRCULATION_ == false {
+            //     this.b_petsc.set(this.gammaIndex_, -this.spatialDisc_.kutta_res_);
+            // }
             this.b_petsc.assemblyComplete();
 
             var its: int;
@@ -1264,7 +1301,11 @@ class temporalDiscretization {
                     forall elem in 1..this.spatialDisc_.nelemDomain_ {
                         this.spatialDisc_.phi_[elem] = phi_backup[elem] + omega * this.x_petsc.get(elem-1);
                     }
-                    this.spatialDisc_.circulation_ = circulation_backup + omega * this.x_petsc.get(this.gammaIndex_);
+                    // this.spatialDisc_.circulation_ = circulation_backup + omega * this.x_petsc.get(this.gammaIndex_);
+                    const phi_upper = this.spatialDisc_.phi_[this.spatialDisc_.upperTEelem_] + (this.spatialDisc_.uu_[this.spatialDisc_.upperTEelem_] * this.spatialDisc_.deltaSupperTEx_ + this.spatialDisc_.vv_[this.spatialDisc_.upperTEelem_] * this.spatialDisc_.deltaSupperTEy_);
+                    const phi_lower = this.spatialDisc_.phi_[this.spatialDisc_.lowerTEelem_] + (this.spatialDisc_.uu_[this.spatialDisc_.lowerTEelem_] * this.spatialDisc_.deltaSlowerTEx_ + this.spatialDisc_.vv_[this.spatialDisc_.lowerTEelem_] * this.spatialDisc_.deltaSlowerTEy_);
+                    const gamma_computed = phi_upper - phi_lower;
+                    this.spatialDisc_.circulation_ = gamma_computed;
                     
                     // Compute new residual
                     this.spatialDisc_.run();
@@ -1285,10 +1326,25 @@ class temporalDiscretization {
                 }
             } else {
                 // === NO LINE SEARCH - fixed omega ===
-                forall elem in 1..this.spatialDisc_.nelemDomain_ {
+                for elem in 1..this.spatialDisc_.nelemDomain_ {
                     this.spatialDisc_.phi_[elem] += omega * this.x_petsc.get(elem-1);
                 }
-                this.spatialDisc_.circulation_ += omega * this.x_petsc.get(this.gammaIndex_);
+                const phi_upper = this.spatialDisc_.phi_[this.spatialDisc_.upperTEelem_] + (this.spatialDisc_.uu_[this.spatialDisc_.upperTEelem_] * this.spatialDisc_.deltaSupperTEx_ + this.spatialDisc_.vv_[this.spatialDisc_.upperTEelem_] * this.spatialDisc_.deltaSupperTEy_);
+                const phi_lower = this.spatialDisc_.phi_[this.spatialDisc_.lowerTEelem_] + (this.spatialDisc_.uu_[this.spatialDisc_.lowerTEelem_] * this.spatialDisc_.deltaSlowerTEx_ + this.spatialDisc_.vv_[this.spatialDisc_.lowerTEelem_] * this.spatialDisc_.deltaSlowerTEy_);
+                const gamma_computed = phi_upper - phi_lower;
+                this.spatialDisc_.circulation_ = gamma_computed;
+                // try! {
+                //     write("phi[253]: ");
+                //     writeln(" %12.16er".format(this.spatialDisc_.phi_[this.spatialDisc_.upperTEelem_]));
+                //     write("gradientPhi[253]: ");
+                //     writeln(" %12.16er %12.16er %12.16er".format(this.spatialDisc_.uu_[this.spatialDisc_.upperTEelem_], this.spatialDisc_.vv_[this.spatialDisc_.upperTEelem_], 0.0));
+                //     write("phi[255]: ");
+                //     writeln(" %12.16er".format(this.spatialDisc_.phi_[this.spatialDisc_.lowerTEelem_]));
+                //     write("gradientPhi[255]: ");
+                //     writeln(" %12.16er %12.16er %12.16er".format(this.spatialDisc_.uu_[this.spatialDisc_.lowerTEelem_], this.spatialDisc_.vv_[this.spatialDisc_.lowerTEelem_], 0.0));
+                //     write("circulation: ");
+                //     writeln(" %12.16er".format(gamma_computed));
+                // }
                 
                 // Compute residual for convergence check
                 this.spatialDisc_.run();
